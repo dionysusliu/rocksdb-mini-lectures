@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L2 · Version 折叠 + 恢复 + CURRENT 原子切换</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .cicd{background:#f0eef6;border:1px solid #d3cce0;border-left:4px solid #6a4c93;padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .cicd .kicker{color:#6a4c93}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  .seq{background:#1e1b16;color:#ede6d6;padding:14px 18px;border-radius:8px;font-family:ui-monospace,monospace;font-size:13px;line-height:1.7;margin:1em 0}
+  .seq .hl{color:#e0c97f}.seq .commit{color:#a8c98a;font-weight:bold}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="l1-log-versionedit.html">← L1</a> &nbsp;·&nbsp; L2 &nbsp;·&nbsp; <a href="l3-engine-integration.html">L3 →</a></div>
+
+  <div class="kicker">TIER 3 · PHASE L · L2</div>
+  <h1>Version 折叠 + 恢复 + CURRENT 原子切换</h1>
+  <p>L1 造了两块零件:<code>log</code>(帧)和 <code>VersionEdit</code>(增量记录)。L2 把它们拼成真正的 MANIFEST 子系统:① <strong>Version</strong>——把一串 edit <strong>折叠</strong>成"当前活文件集";② <strong>恢复</strong>——open 时读 <code>CURRENT</code> → 打开它指向的 MANIFEST → replay 重建 Version;③ <strong>原子安装</strong>——写新 MANIFEST + 原子切 <code>CURRENT</code> 的那套序列。</p>
+  <p>这是整个 Phase L 的<strong>旗舰</strong>。压轴是一个新 harness 系统:<strong>元数据崩溃恢复</strong>——沿安装序列每一步注入崩溃,断言恢复永远落在<strong>某个一致状态(全旧或全新),绝不撕裂</strong>。而 <code>CURRENT</code> 的 <code>rename</code> 这个"原子发布",正是你 backlog 里"无锁发布新状态"在文件粒度上的同一招。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">① <code>src/version.rs</code>:<code>Version</code>(活文件集) + <code>apply(edit)</code>(add/delete 双分支折叠) + <code>to_snapshot_edit()</code> + <code>files_newest_first()</code>。② <code>src/manifest.rs</code>:<code>recover(dir)</code>(读 CURRENT→replay→重建) + <code>install(...)</code>(7 步原子安装,含 fsync 父目录) + <code>append_edit()</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 一串 edit 折叠出正确的活文件集(含 delete 移除分支);写 MANIFEST + 切 CURRENT 后 <code>recover</code> 拿回同一个 Version;<strong>崩溃恢复四例(a/b1/b2/c)全绿</strong>——撕裂尾取前缀、切换前崩落全旧、残 tmp 被无视。</p>
+  </div>
+
+  <h2>地基三:Version = fold(edits)</h2>
+  <p>MANIFEST 是一串 VersionEdit。"当前有哪些文件"不直接存,而是<strong>从空集开始,把每条 edit 叠一遍</strong>:add 插入、delete 移除。这就是 L1 🧠 讲的 event-sourcing 折叠。扁平 MVP 下 Version 就是<strong>一组文件号</strong>(分层留给 Phase M):</p>
+  <pre>    <span class="c">// 扁平 MVP:就是一组活文件号(无 level)。读序由号导出:号越大=越晚 flush=越新。</span>
+    <span class="c">#[derive(Debug, Default, Clone)]</span>
+    <span class="k">pub struct</span> <span class="t">Version</span> { files: BTreeSet&lt;u64&gt; }
+
+    <span class="k">impl</span> <span class="t">Version</span> {
+        <span class="c">// 折叠一条 edit:add 插入,delete 移除。</span>
+        <span class="k">pub fn</span> <span class="f">apply</span>(&amp;<span class="k">mut</span> self, edit: &amp;VersionEdit) {
+            <span class="k">for</span> &amp;f <span class="k">in</span> &amp;edit.new_files     { self.files.<span class="f">insert</span>(f); }
+            <span class="k">for</span> &amp;f <span class="k">in</span> &amp;edit.deleted_files { self.files.<span class="f">remove</span>(&amp;f); }   <span class="c">// ← edit 的灵魂分支</span>
+        }
+        <span class="c">// 活文件号,新→旧(降序),喂给读路径。</span>
+        <span class="k">pub fn</span> <span class="f">files_newest_first</span>(&amp;self) -> Vec&lt;u64&gt; {
+            self.files.<span class="f">iter</span>().<span class="f">rev</span>().<span class="f">copied</span>().<span class="f">collect</span>()
+        }
+        <span class="c">// 把当前活集压成一条全量 edit——新 MANIFEST 的首记录(把历史折成一个 checkpoint)。</span>
+        <span class="k">pub fn</span> <span class="f">to_snapshot_edit</span>(&amp;self, next_file_number: u64, last_sequence: u64) -> VersionEdit {
+            VersionEdit {
+                new_files: self.files.<span class="f">iter</span>().<span class="f">copied</span>().<span class="f">collect</span>(),
+                deleted_files: Vec::<span class="f">new</span>(),
+                next_file_number: Some(next_file_number),
+                last_sequence: Some(last_sequence),
+            }
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>读序为什么能"由号导出"?</strong> Phase L 文件只来自 flush,号单调递增,<strong>号大 = 后 flush = 数据新</strong>。所以"号降序"就是"新→旧",与原 <code>discover_ssts</code>(<code>sort + rev</code>)同一规则。注意这个假设到 Phase O(compaction)会失效——一个 L1 输出文件号很大却装着旧数据——那正是 Phase M 要引入 level 的原因。本期诚实地继续用号序。</p>
+
+  <h2>地基四:CURRENT 与原子安装</h2>
+  <p>恢复要先知道"读哪个 MANIFEST"。这就是 <code>CURRENT</code> 文件的活:它存<strong>当前活跃 MANIFEST 的裸文件名</strong>(如 <code>MANIFEST-000007\n</code>)。而每当我们写一个<strong>新</strong> MANIFEST(open 强制 checkpoint,或运行期体积过阈轮换——见 L3),都要把 CURRENT <strong>原子地</strong>切过去。原子序列(对标 RocksDB <code>SetCurrentFile</code>):</p>
+  <div class="seq">
+    <span class="hl">1.</span> 写快照 edit 进 MANIFEST-&lt;n&gt;          <span class="c">(CURRENT 仍指旧)</span><br>
+    <span class="hl">2.</span> fsync(MANIFEST-&lt;n&gt;)                  <span class="c">// 新文件落盘后才敢切</span><br>
+    <span class="hl">3.</span> 写 CURRENT.tmp = "MANIFEST-&lt;n&gt;\n"<br>
+    <span class="hl">4.</span> fsync(CURRENT.tmp)<br>
+    <span class="commit">5. rename(CURRENT.tmp → CURRENT)      ← 原子提交点(POSIX rename 原子)</span><br>
+    <span class="hl">6.</span> fsync(父目录)                       <span class="c">// 让 rename 这个目录改动本身持久</span>
+  </div>
+  <p>第 5 步是<strong>唯一的提交点</strong>:<code>rename</code> 在 POSIX 上是原子的,要么旧名要么新名,绝无"半个文件名"。崩在 5 之前 → CURRENT 仍旧 → 恢复读到<strong>完整旧 MANIFEST</strong>;崩在 5 之后 → 读到<strong>完整新 MANIFEST</strong>。两种都是一致状态。第 6 步常被漏掉:<code>rename</code> 改的是<strong>目录项</strong>,不 fsync 目录,这条改动可能没落盘,崩溃后 CURRENT 退回旧值——所以要 fsync 父目录,让"切换"这个动作本身持久。</p>
+
+  <h3>代码 1 — manifest.rs(recover + install)</h3>
+  <pre>    <span class="k">pub struct</span> <span class="t">Recovered</span> { <span class="k">pub</span> version: Version, <span class="k">pub</span> next_file_number: u64, <span class="k">pub</span> last_sequence: u64 }
+    <span class="k">pub struct</span> <span class="t">Manifest</span> { writer: LogWriter, size: u64 }   <span class="c">// size:轮换阈值用(L3)</span>
+
+    <span class="k">fn</span> <span class="f">manifest_name</span>(num: u64) -> String { <span class="f">format!</span>(<span class="s">"MANIFEST-{num:06}"</span>) }
+
+    <span class="k">impl</span> <span class="t">Manifest</span> {
+        <span class="c">// 读 CURRENT 指向的 MANIFEST、replay 重建。None = 全新库(无 CURRENT)。</span>
+        <span class="k">pub fn</span> <span class="f">recover</span>(dir: &amp;Path) -> Result&lt;Option&lt;Recovered&gt;&gt; {
+            <span class="k">let</span> name = <span class="k">match</span> fs::<span class="f">read_to_string</span>(dir.<span class="f">join</span>(<span class="s">"CURRENT"</span>)) {
+                Ok(s) => s.<span class="f">trim</span>().<span class="f">to_string</span>(),
+                Err(e) <span class="k">if</span> e.<span class="f">kind</span>() == ErrorKind::NotFound => <span class="k">return</span> Ok(None),  <span class="c">// 全新库</span>
+                Err(e) => <span class="k">return</span> Err(e.<span class="f">into</span>()),
+            };
+            <span class="k">let</span> (<span class="k">mut</span> version, <span class="k">mut</span> nfn, <span class="k">mut</span> ls) = (Version::<span class="f">new</span>(), 0, 0);
+            <span class="k">for</span> rec <span class="k">in</span> log::<span class="f">read_all</span>(&amp;dir.<span class="f">join</span>(&amp;name))? {   <span class="c">// log 容错:撕裂尾自动停</span>
+                <span class="k">let</span> edit = VersionEdit::<span class="f">decode</span>(&amp;rec)?;
+                version.<span class="f">apply</span>(&amp;edit);                          <span class="c">// 折叠</span>
+                <span class="k">if let</span> Some(n) = edit.next_file_number { nfn = n; }   <span class="c">// 后写覆盖先写</span>
+                <span class="k">if let</span> Some(s) = edit.last_sequence    { ls = s; }
+            }
+            Ok(Some(Recovered { version, next_file_number: nfn, last_sequence: ls }))
+        }
+
+        <span class="c">// 原子安装一个新 MANIFEST(首记录=version 的全量快照),再把 CURRENT 指过去。</span>
+        <span class="c">// open 强制 checkpoint 与 体积过阈轮换 共用这一台机器。</span>
+        <span class="k">pub fn</span> <span class="f">install</span>(dir: &amp;Path, manifest_num: u64, version: &amp;Version,
+                       next_file_number: u64, last_sequence: u64) -> Result&lt;Self&gt; {
+            <span class="k">let</span> path = dir.<span class="f">join</span>(<span class="f">manifest_name</span>(manifest_num));
+            <span class="k">let</span> <span class="k">mut</span> writer = LogWriter::<span class="f">create_truncate</span>(&amp;path)?;
+            <span class="k">let</span> payload = version.<span class="f">to_snapshot_edit</span>(next_file_number, last_sequence).<span class="f">encode</span>();
+            <span class="k">let</span> size = (payload.<span class="f">len</span>() + 8) <span class="k">as</span> u64;
+            writer.<span class="f">append</span>(&amp;payload)?;
+            writer.<span class="f">sync</span>()?;                                    <span class="c">// (2) 新 MANIFEST 落盘</span>
+
+            <span class="k">let</span> tmp = dir.<span class="f">join</span>(<span class="s">"CURRENT.tmp"</span>);
+            { <span class="k">let</span> <span class="k">mut</span> f = fs::File::<span class="f">create</span>(&amp;tmp)?;
+              <span class="f">writeln!</span>(f, <span class="s">"{}"</span>, <span class="f">manifest_name</span>(manifest_num))?;        <span class="c">// (3)</span>
+              f.<span class="f">sync_all</span>()?; }                                <span class="c">// (4)</span>
+            fs::<span class="f">rename</span>(&amp;tmp, dir.<span class="f">join</span>(<span class="s">"CURRENT"</span>))?;             <span class="c">// (5) 原子提交点</span>
+            <span class="f">fsync_dir</span>(dir)?;                                   <span class="c">// (6) 让 rename 持久</span>
+            Ok(Self { writer, size })
+        }
+
+        <span class="c">// 追加一条增量 edit 并 fsync——这条 fsync 是 flush 的提交点(L3 用)。</span>
+        <span class="k">pub fn</span> <span class="f">append_edit</span>(&amp;<span class="k">mut</span> self, edit: &amp;VersionEdit) -> Result&lt;()&gt; {
+            <span class="k">let</span> payload = edit.<span class="f">encode</span>();
+            self.size += (payload.<span class="f">len</span>() + 8) <span class="k">as</span> u64;
+            self.writer.<span class="f">append</span>(&amp;payload)?; self.writer.<span class="f">sync</span>()?; Ok(())
+        }
+    }
+
+    <span class="c">// fsync 一个目录,让其中的 rename/create 持久。</span>
+    <span class="k">fn</span> <span class="f">fsync_dir</span>(dir: &amp;Path) -> Result&lt;()&gt; { fs::File::<span class="f">open</span>(dir)?.<span class="f">sync_all</span>()?; Ok(()) }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>恢复里"后写覆盖先写"</strong>:一个 MANIFEST 开头是全量快照(带 <code>next_file_number/last_sequence</code>),后面跟若干增量 edit(flush 每次也带新的计数器值)。replay 时按出现顺序覆盖,最后留下的就是最新值。这正是日志折叠:<strong>同一字段的多次写,时间靠后的赢。</strong></p>
+
+  <h2>🧰 Coding style:制造-再发布,绝不原地改</h2>
+  <ul>
+    <li><strong>从不原地改活状态</strong>:要更新 CURRENT,不是打开它写两个字节(那会留下"改了一半"的窗口),而是<strong>在旁边造一个完整的新文件(CURRENT.tmp),再用一步 <code>rename</code> 让它整体顶替</strong>。读者任一时刻看到的 CURRENT 要么是完整旧的、要么是完整新的。</li>
+    <li><strong>把"提交"收缩成单点</strong>:整个安装序列里,只有 <code>rename</code> 那一行是不可分割的提交。它之前的所有写都是"准备",可随意重来或丢弃;它一旦完成,新状态整体生效。<strong>设计崩溃安全的通法:把多步操作压成"一堆可重做的准备 + 一个原子提交"。</strong></li>
+    <li><strong>顺序即正确性</strong>:fsync 新文件 <em>必须</em> 在切 CURRENT 之前(否则 CURRENT 指向一个可能没落盘的文件);fsync 目录 <em>必须</em> 在最后(否则切换本身可能丢)。这些顺序不是装饰,是约束。</li>
+  </ul>
+
+  <h2>🧠 System mindset ★:原子指针切换 —— 三种粒度,同一个不变量</h2>
+  <p>CURRENT 的 <code>rename</code> 是一次<strong>原子发布</strong>:把一个新状态"发布"出去,让所有后续读者要么完全看到、要么完全看不到,绝无中间态。这个模式你已经见过、还会反复见到——它在<strong>三种粒度</strong>上是同一回事:</p>
+  <table>
+    <thead><tr><th>粒度</th><th>原子操作</th><th>发布什么</th><th>在本课程</th></tr></thead>
+    <tbody>
+      <tr><td>字级</td><td>CAS(compare-and-swap)</td><td>无锁跳表插一个新节点</td><td>backlog:并发 MemTable</td></tr>
+      <tr><td>指针级</td><td>原子换 <code>Arc</code> / SuperVersion 指针</td><td>RCU 发布新只读 Version</td><td>D 阶段 <code>Arc</code>+freeze</td></tr>
+      <tr><td>文件级</td><td><code>rename</code></td><td>CURRENT 切到新 MANIFEST</td><td><strong>本课</strong></td></tr>
+    </tbody>
+  </table>
+  <p>三者<strong>本质同构</strong>:</p>
+  <div class="warnbox"><strong>先在旁边把新状态造完整,再用<em>一步</em>原子操作让它可见;读者永远看不到半成品。</strong> 字级靠 CPU 的 CAS 指令保证那一步原子;指针级靠原子指针写;文件级靠文件系统的 <code>rename</code>。机制不同,纪律相同。</div>
+  <p><strong>连上你的 backlog(并发写 / 无锁发布)。</strong> 你标记过要深挖"LSM 写并发模型:无锁跳表 CAS+epoch、RocksDB 用 <code>Arc</code> 发布 SuperVersion"。那道题的核心难点就是这一个:<strong>一个写者如何在不阻塞、不让读者看到撕裂状态的前提下,发布一份新数据?</strong> 答案在三种粒度上都是"制造-再发布"。本课先在<strong>文件粒度</strong>把它吃透(rename 最直观、可在测试里手工注入崩溃);到 Tier 4 重构成多线程后,同一招会上升到<strong>指针粒度</strong>(原子换 SuperVersion),那时你对"为什么发布必须原子、为什么不能原地改"已经有了肌肉记忆。RocksDB 自己就是这么统一的:<code>InstallSuperVersion</code>(指针级)和 <code>SetCurrentFile</code>(文件级)是同一个"原子发布"哲学的两次落地。</p>
+  <div class="src">RocksDB 锚: db/version_set.cc SetCurrentFile(写 tmp → rename → fsync dir,与本课 install 逐行对应) · 对照 InstallSuperVersion(指针级同款)</div>
+
+  <h2>🧪 Harness 系统:元数据崩溃恢复(新系统,累计第 8 种)</h2>
+  <p>测试里没有真崩溃。手法:<strong>手工构造"崩在第 X 步"会留在磁盘上的字节状态</strong>,再 <code>recover</code>,断言落在一致状态。安装序列每步之间都是崩溃点。旗舰不变量:<strong>恢复出的 Version 永远是某个一致状态(全旧或全新),绝不撕裂。</strong></p>
+  <div class="harness">
+    <div class="kicker">四个崩溃点</div>
+    <table style="margin:.4em 0 0">
+      <thead><tr><th>例</th><th>构造</th><th>恢复应落在</th></tr></thead>
+      <tbody>
+        <tr><td><strong>a</strong> 增量 edit 撕裂尾</td><td>写完 MANIFEST 后 <code>set_len</code> 砍尾几字节</td><td>撕裂前的前缀 Version</td></tr>
+        <tr><td><strong>b1</strong> 新 MANIFEST 完整但没切</td><td>放一个完整新 MANIFEST,CURRENT 仍指旧</td><td>全旧(新文件成孤儿)</td></tr>
+        <tr><td><strong>b2</strong> 新 MANIFEST 只写一半</td><td>放一个半截 MANIFEST,CURRENT 仍指旧</td><td>全旧(半文件压根不被读)</td></tr>
+        <tr><td><strong>c</strong> 残留 CURRENT.tmp</td><td>留一个 CURRENT.tmp,CURRENT 仍旧</td><td>全旧(tmp 被无视)</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>代码 2 — 崩溃恢复 harness</h3>
+  <pre>    <span class="k">fn</span> <span class="f">recovered_files</span>(dir: &amp;Path) -> Vec&lt;u64&gt; {     <span class="c">// 恢复出活文件集,新→旧</span>
+        Manifest::<span class="f">recover</span>(dir).<span class="f">unwrap</span>().<span class="f">map</span>(|r| r.version.<span class="f">files_newest_first</span>()).<span class="f">unwrap_or_default</span>()
+    }
+
+    <span class="c">#[test]</span> <span class="c">// (a) 增量 edit 撕裂尾 → 取前缀</span>
+    <span class="k">fn</span> <span class="f">crash_a_torn_incremental_edit</span>() {
+        <span class="k">let</span> <span class="k">mut</span> v = Version::<span class="f">new</span>(); <span class="k">let</span> <span class="k">mut</span> e0 = VersionEdit::<span class="f">new</span>(); e0.new_files = vec![1]; v.<span class="f">apply</span>(&amp;e0);
+        <span class="k">let</span> <span class="k">mut</span> m = Manifest::<span class="f">install</span>(dir, 0, &amp;v, 1, 10).<span class="f">unwrap</span>();        <span class="c">// 快照 {1}</span>
+        <span class="k">let</span> <span class="k">mut</span> e1 = VersionEdit::<span class="f">new</span>(); e1.new_files = vec![2]; e1.next_file_number = Some(3);
+        m.<span class="f">append_edit</span>(&amp;e1).<span class="f">unwrap</span>();                                <span class="c">// 追加 {add 2}</span>
+        <span class="k">let</span> mp = manifest::<span class="f">current_target</span>(dir).<span class="f">unwrap</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> len = fs::<span class="f">metadata</span>(&amp;mp).<span class="f">unwrap</span>().<span class="f">len</span>();
+        OpenOptions::<span class="f">new</span>().<span class="f">write</span>(<span class="k">true</span>).<span class="f">open</span>(&amp;mp).<span class="f">unwrap</span>().<span class="f">set_len</span>(len - 3).<span class="f">unwrap</span>();   <span class="c">// 撕</span>
+        <span class="f">assert_eq!</span>(<span class="f">recovered_files</span>(dir), vec![1]);              <span class="c">// 残尾被丢,只剩快照 {1}</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// (b1) 新 MANIFEST 完整但 CURRENT 没切 → 全旧</span>
+    <span class="k">fn</span> <span class="f">crash_b1_new_manifest_complete_not_switched</span>() {
+        <span class="k">let</span> <span class="k">mut</span> old = Version::<span class="f">new</span>(); <span class="k">let</span> <span class="k">mut</span> e0 = VersionEdit::<span class="f">new</span>(); e0.new_files = vec![1]; old.<span class="f">apply</span>(&amp;e0);
+        Manifest::<span class="f">install</span>(dir, 0, &amp;old, 1, 10).<span class="f">unwrap</span>();             <span class="c">// CURRENT → MANIFEST-000000</span>
+        <span class="k">let</span> <span class="k">mut</span> newv = old.<span class="f">clone</span>(); <span class="k">let</span> <span class="k">mut</span> e1 = VersionEdit::<span class="f">new</span>(); e1.new_files = vec![2]; newv.<span class="f">apply</span>(&amp;e1);
+        { <span class="k">let</span> <span class="k">mut</span> w = LogWriter::<span class="f">create_truncate</span>(&amp;dir.<span class="f">join</span>(<span class="s">"MANIFEST-000002"</span>)).<span class="f">unwrap</span>();
+          w.<span class="f">append</span>(&amp;newv.<span class="f">to_snapshot_edit</span>(3, 20).<span class="f">encode</span>()).<span class="f">unwrap</span>(); w.<span class="f">sync</span>().<span class="f">unwrap</span>(); }  <span class="c">// 完整新文件,但没切</span>
+        <span class="f">assert_eq!</span>(<span class="f">current_name</span>(dir), <span class="s">"MANIFEST-000000"</span>);
+        <span class="f">assert_eq!</span>(<span class="f">recovered_files</span>(dir), vec![1]);              <span class="c">// 仍全旧 {1};新文件是孤儿</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// (b2) 新 MANIFEST 只写一半 → 全旧,半文件根本不被读</span>
+    <span class="k">fn</span> <span class="f">crash_b2_new_manifest_half_written</span>() {
+        <span class="c">/* install old {1} 同上 */</span>
+        fs::<span class="f">write</span>(dir.<span class="f">join</span>(<span class="s">"MANIFEST-000002"</span>), b<span class="s">"\x00\x01\x02half"</span>).<span class="f">unwrap</span>();  <span class="c">// 半截垃圾</span>
+        <span class="f">assert_eq!</span>(<span class="f">recovered_files</span>(dir), vec![1]);   <span class="c">// CURRENT 没切 → 半文件永不被打开</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// (c) 残留 CURRENT.tmp → 被无视</span>
+    <span class="k">fn</span> <span class="f">crash_c_leftover_current_tmp</span>() {
+        <span class="c">/* install old {1} 同上 */</span>
+        fs::<span class="f">write</span>(dir.<span class="f">join</span>(<span class="s">"CURRENT.tmp"</span>), b<span class="s">"MANIFEST-000002\n"</span>).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(<span class="f">recovered_files</span>(dir), vec![1]);   <span class="c">// 恢复只认 CURRENT,tmp 是噪音</span>
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>b1 vs b2 的细分意义:</strong> b1 证明"即便新 MANIFEST 写得完美无瑕,只要 CURRENT 没切,它就等于不存在";b2 进一步证明"哪怕新 MANIFEST 是残的也无所谓,反正 CURRENT 没切、没人会去读它"。两例合起来钉死一句话:<strong>新文件的完整性根本不影响一致性——决定一切的是那个 rename 切没切。</strong>这就是把提交收缩成单点的回报。</p>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo clippy --all-targets -- -D warnings</div>
+  <div class="done"><div class="kicker">L2 判定 — 全绿</div><p style="margin:.3em 0 0"><code>crash_a_torn_incremental_edit ... ok</code> · <code>crash_b1_..._not_switched ... ok</code> · <code>crash_b2_..._half_written ... ok</code> · <code>crash_c_leftover_current_tmp ... ok</code> · <code>clean_rotation_lands_new ... ok</code> · <code>fold_adds_then_deletes ... ok</code><br>clippy 0 warning · fmt 干净</p></div>
+
+  <h2>🔄 CI/CD:崩溃恢复进回归门</h2>
+  <div class="cicd">
+    <div class="kicker">本课增量</div>
+    <p style="margin:.3em 0 0">四个崩溃恢复测试是<strong>纯文件手术 + 公开 <code>recover</code> 断言</strong>,无需特殊环境,直接并入 <code>cargo test --all</code>。意义重大:<strong>崩溃安全这种"平时看不见、出事才致命"的属性,被钉成了每次提交都自动验证的回归测试。</strong>以后任何人改动安装序列(比如手贱把 fsync 顺序调换、或省掉 fsync dir),只要破坏了"全旧/全新"不变量,CI 立刻红。这是把"崩溃一致性"从口头约定变成<strong>可执行规格</strong>。L1 的格式可逆性 + L2 的崩溃一致性,两道砝码叠起来,这条流水线已经在守护引擎最难肉眼复查的两类正确性。</p>
+  </div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">L2 想透这几个</div>
+    <ol>
+      <li><strong>为什么 <code>install</code> 第 2 步(fsync 新 MANIFEST)必须在切 CURRENT 之前,而第 6 步(fsync 父目录)必须在最后?</strong> 把这两个顺序各自调换,分别会在什么崩溃时机暴露什么 bug?</li>
+      <li><strong>b1 和 b2 恢复结果完全一样(全旧),为什么还要拆成两个测试?</strong> 各自证明了什么独立的事实?</li>
+      <li><strong>CURRENT 的 <code>rename</code>、RCU 的 <code>Arc</code> 指针交换、无锁跳表的 CAS,共享哪一个不变量?</strong> 用一句话概括,并说出三者各自"那一步原子"是谁保证的。</li>
+      <li><strong>恢复时 <code>next_file_number</code> 用"后写覆盖先写"取最后一个值——如果某条增量 edit 没带这个字段(Option 为 None)会怎样?</strong> 这对"稀疏增量"编码提了什么要求?</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一站:L3 — 接进 Engine。</strong> MANIFEST 子系统造好了,但还没接到引擎上。L3 让 <code>open</code> 用 <code>recover</code> 替换 <code>discover_ssts</code>(扫盘正式退役)、<code>flush</code> 发一条 VersionEdit(并定下 <code>SST→manifest→WAL 截断</code> 的崩溃排序)、<code>next_sst</code> 升级成共享的 <code>next_file_number</code>。还会加一条"往目录扔孤儿 SST、断言读不到"的回归守卫,证明引擎从此<strong>信 manifest、不信目录</strong>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/version_set.cc">version_set.cc</a>(Recover / SetCurrentFile)。</p>
+    <p>四例全绿,去 <a href="l3-engine-integration.html">L3</a>。</p>
+  </div>
+</div>
+</body>
+</html>

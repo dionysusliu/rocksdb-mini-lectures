@@ -148,7 +148,7 @@
   <p class="tier-sub">这是你在阶段 3 改过源码的地方(L07 双层门控/Lab09 CompactionFilter)。现在从零造它。</p>
   <table>
     <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
-    <tr><td class="id">L</td><td>Manifest / Version / VersionEdit(记录哪些 SST 在哪层)</td><td class="anchor">version_set.cc / manifest</td><td class="harn">元数据崩溃恢复</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">L</td><td>Manifest / Version / VersionEdit(扁平:记录哪些 SST 活着;分层留给 M)—— L1 log+VersionEdit · L2 恢复+CURRENT 原子切换 · L3 接 Engine 扫盘退役</td><td class="anchor">version_set.cc Recover/LogAndApply/SetCurrentFile</td><td class="harn">元数据崩溃恢复(a/b1/b2/c)+ 孤儿 SST 守卫</td><td><span class="st now">now</span></td></tr>
     <tr><td class="id">M</td><td>分层布局:L0(可重叠) + L1..Ln(不重叠)</td><td class="anchor">version_storage_info</td><td class="harn">层不变量</td><td><span class="st todo">todo</span></td></tr>
     <tr><td class="id">N</td><td>compaction picker(选哪些文件)— 接 L07 双层门控</td><td class="anchor">compaction_picker_level.cc</td><td class="harn">选择正确性</td><td><span class="st todo">todo</span></td></tr>
     <tr><td class="id">O</td><td>compaction job(归并 SST、丢被覆盖/墓碑数据)</td><td class="anchor">compaction_job.cc</td><td class="harn">合并不丢/不复活</td><td><span class="st todo">todo</span></td></tr>
@@ -201,10 +201,10 @@
   <div class="milestone">🏁 <strong>M6 — 你自己的 RocksDB</strong>:从零造出的、特性可对标的单机 LSM 引擎。mission 第四段达成,且远超。</div>
 
   <div class="foot">
-    <p><strong>当前位置.</strong> Tier 1:A✓ B✓ C✓ D✓ → <strong>M1 MVP</strong>。Tier 2:E✓(E1–E5 块化+基准+前缀压缩+CRC/lz4 全完成)· F✓(F1 BlockIter + F2 SstIter + F3 MemTableIter 全完成,三源同 LsmIterator)→ G✓(G1 MergeIterator min-heap 归并 + G2 engine.scan 范围读)→ H✓(InternalKey 字节可比编码 + seq 全路径 + 墓碑/delete)→ J✓(snapshot + get_as_of 点读时间旅行)→ K✓(DBIter + scan_as_of 范围时间旅行,去重归位到 DBIter)→ <strong>M2 多版本引擎收官</strong>。Tier 2 全部完成,下一站 Tier 3 compaction。反向迭代 prev 列为高级后续、不进主线。Phase S(block cache)lab 已提前出,被 E3 基准"热块重复读盘"牵引。</p>
+    <p><strong>当前位置.</strong> Tier 1:A✓ B✓ C✓ D✓ → <strong>M1 MVP</strong>。Tier 2:E✓(E1–E5 块化+基准+前缀压缩+CRC/lz4 全完成)· F✓(F1 BlockIter + F2 SstIter + F3 MemTableIter 全完成,三源同 LsmIterator)→ G✓(G1 MergeIterator min-heap 归并 + G2 engine.scan 范围读)→ H✓(InternalKey 字节可比编码 + seq 全路径 + 墓碑/delete)→ J✓(snapshot + get_as_of 点读时间旅行)→ K✓(DBIter + scan_as_of 范围时间旅行,去重归位到 DBIter)→ <strong>M2 多版本引擎收官</strong>。Tier 2 全部完成。<strong>Tier 3 起步:L(now,lab 0013 三课已出 + 参考实现 15 测试全绿)</strong>——MANIFEST/Version/VersionEdit 把"扫盘猜 SST"换成权威元数据日志,CURRENT 原子切换扛崩溃,扫盘 discover_ssts 退役。下一站 Phase M 分层。反向迭代 prev 列为高级后续、不进主线。Phase S(block cache)lab 已提前出,被 E3 基准"热块重复读盘"牵引。</p>
     <p style="font-size:.86em;color:var(--soft)"><strong>Tier 2 排序裁决(grilling).</strong> 维持 F→G→H,G 先在 plain key 上跑通、H3 再重写 G 比较器——"重写"是刻意教学点(亲历 seq 如何改比较器与去重)。LsmIterator 用裸 &amp;[u8] + 比较规则外置到 MergeIterator,使 H 改造只碰"存的 key 字节 / merge 比较器 / 上层解码"三处,不动 trait 签名。读路径两条并存(手写 get 命中即停 护 Phase R bloom · merge scan),靠 <code>get(k)≡scan(k..=k).first()</code> 差分锁一致。</p>
     <p><strong>粒度可调.</strong> 任何 phase 觉得跨度大,可现场再拆(如 Phase A 拆成 A1/A2/A3、Phase D 拆成 D1/D2/D3)。觉得想合并/跳过/换序,随时说。</p>
-    <p><strong>lab 索引.</strong> <a href="0002-phase-a-memtable/index.html">Lab 0002 Phase A</a> · <a href="0003-phase-b-wal/index.html">Lab 0003 Phase B</a> · <a href="0004-phase-c-sst/index.html">Lab 0004 Phase C</a> · <a href="0005-phase-d-readpath/index.html">Lab 0005 Phase D</a> · <a href="0006-phase-e-block-sst/index.html">Lab 0006 Phase E</a> · <a href="0007-phase-f-iterator/index.html">Lab 0007 Phase F</a> · <a href="0008-phase-s-block-cache/index.html">Lab 0008 Phase S</a></p>
+    <p><strong>lab 索引.</strong> <a href="0002-phase-a-memtable/index.html">Lab 0002 Phase A</a> · <a href="0003-phase-b-wal/index.html">Lab 0003 Phase B</a> · <a href="0004-phase-c-sst/index.html">Lab 0004 Phase C</a> · <a href="0005-phase-d-readpath/index.html">Lab 0005 Phase D</a> · <a href="0006-phase-e-block-sst/index.html">Lab 0006 Phase E</a> · <a href="0007-phase-f-iterator/index.html">Lab 0007 Phase F</a> · <a href="0008-phase-s-block-cache/index.html">Lab 0008 Phase S</a> · <a href="0013-phase-l-manifest/index.html">Lab 0013 Phase L</a></p>
   </div>
 </div>
 </body>

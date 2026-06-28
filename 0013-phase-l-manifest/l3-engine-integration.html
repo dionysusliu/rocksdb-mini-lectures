@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L3 · 接进 Engine — 扫盘退役</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .cicd{background:#f0eef6;border:1px solid #d3cce0;border-left:4px solid #6a4c93;padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .cicd .kicker{color:#6a4c93}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  .seq{background:#1e1b16;color:#ede6d6;padding:14px 18px;border-radius:8px;font-family:ui-monospace,monospace;font-size:13px;line-height:1.7;margin:1em 0}
+  .seq .commit{color:#a8c98a;font-weight:bold}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="l2-recovery-current.html">← L2</a> &nbsp;·&nbsp; L3 &nbsp;·&nbsp; <a href="index.html">Phase L</a></div>
+
+  <div class="kicker">TIER 3 · PHASE L · L3</div>
+  <h1>接进 Engine — 扫盘退役</h1>
+  <p>MANIFEST 子系统(L1 的 <code>log</code>+<code>VersionEdit</code>、L2 的 <code>Version</code>+<code>recover</code>+<code>install</code>)造齐了,但还悬在引擎之外。L3 把它焊上:让 <code>open</code> 用 <code>recover</code> 替换 <code>discover_ssts</code>(<strong>扫盘正式退役</strong>)、<code>flush</code> 发一条 VersionEdit 并定下崩溃排序、<code>next_sst</code> 升级成共享的 <code>next_file_number</code>。收尾用一条"<strong>往目录扔孤儿 SST、断言读不到</strong>"的回归守卫,把"引擎信 manifest、不信目录"钉死。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">改 <code>engine.rs</code>:① <code>open</code> = replay WAL + <code>Manifest::recover</code> 重建 Version + open-time 强制 checkpoint(删 <code>discover_ssts</code>);② <code>flush</code> 发 edit,排序 <strong>SST(fsync)→ manifest edit(fsync=提交点)→ 截 WAL</strong>;③ <code>next_sst</code> → <code>next_file_number</code>(SST 与 MANIFEST 共用);④ <code>last_sequence</code> = <code>max(manifest 值, WAL replay 最大 seq)</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 重开经 manifest 取回全部数据(已 flush 的来自 SST、未 flush 的来自 WAL);文件号跨重开单调不撞;<strong>孤儿 SST(目录里有、manifest 没记)读不到</strong>;既有引擎测试全回归。</p>
+  </div>
+
+  <h2>open:从"扫盘猜"到"读账本"</h2>
+  <p>对照旧 <code>open</code> 的 <code>discover_ssts</code>(列目录、排序、<code>max+1</code>)和新 <code>open</code>:数据来源从"文件系统目录列表"换成"MANIFEST 这本账"。四步:</p>
+  <pre>    <span class="k">pub fn</span> <span class="f">open</span>(dir: &amp;Path) -> Result&lt;Self&gt; {
+        std::fs::<span class="f">create_dir_all</span>(dir)?;
+        <span class="k">let</span> wal_path = dir.<span class="f">join</span>(<span class="s">"wal.log"</span>);
+
+        <span class="c">// 1. replay WAL → memtable,记下见过的最大 seq</span>
+        <span class="k">let</span> (<span class="k">mut</span> mem, <span class="k">mut</span> max_wal_seq) = (MemTable::<span class="f">new</span>(), 0u64);
+        <span class="k">for</span> (seq, k, v) <span class="k">in</span> Wal::<span class="f">replay</span>(&amp;wal_path)? { mem.<span class="f">put</span>(k, v); max_wal_seq = max_wal_seq.<span class="f">max</span>(seq); }
+        <span class="k">let</span> wal = Wal::<span class="f">open_append</span>(&amp;wal_path)?;
+
+        <span class="c">// 2. 从 MANIFEST 恢复活文件集(替换 discover_ssts)。None = 全新库。</span>
+        <span class="k">let</span> (version, <span class="k">mut</span> next_file_number, manifest_seq) = <span class="k">match</span> Manifest::<span class="f">recover</span>(dir)? {
+            Some(r) => (r.version, r.next_file_number, r.last_sequence),
+            None    => (Version::<span class="f">new</span>(), 0, 0),
+        };
+        <span class="k">let</span> seq = manifest_seq.<span class="f">max</span>(max_wal_seq);          <span class="c">// ← manifest 给地板,WAL 续高</span>
+
+        <span class="c">// 3. 只为 manifest 列出的文件开 reader,新→旧</span>
+        <span class="k">let</span> <span class="k">mut</span> ssts = Vec::<span class="f">new</span>();
+        <span class="k">for</span> num <span class="k">in</span> version.<span class="f">files_newest_first</span>() { ssts.<span class="f">push</span>(SstReader::<span class="f">open</span>(&amp;<span class="f">sst_path</span>(dir, num))?); }
+
+        <span class="c">// 4. open-time 强制 checkpoint:把恢复出的 Version 快照进新 MANIFEST、原子切 CURRENT(折叠历史)</span>
+        <span class="k">let</span> manifest_num = next_file_number; next_file_number += 1;
+        <span class="k">let</span> manifest = Manifest::<span class="f">install</span>(dir, manifest_num, &amp;version, next_file_number, seq)?;
+
+        Ok(Self { mem, wal, ssts, version, manifest, dir: dir.<span class="f">into</span>(),
+                  next_file_number, seq, flush_threshold: 4&lt;&lt;20, max_manifest_size: 64&lt;&lt;10 })
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>第 4 步:open 现在带写副作用</strong>——每次开库都写一个新 MANIFEST、切 CURRENT。这是<strong>故意的</strong>:把上次开库以来累积的一长串增量 edit 折成一条全量快照,下次开库 replay 量恒定(L2 🧠 的"checkpoint")。它复用 L2 的 <code>install</code>,所以每次 open 都跑一遍原子安装——崩溃 harness 因此<strong>每次重开都有靶子</strong>。<strong>全新库</strong>(<code>recover</code> 返回 <code>None</code>)走同一条路:空 Version 也 install,写出 <code>MANIFEST-000000</code> + CURRENT,完成 bootstrap。</p>
+  <div class="warnbox"><strong><code>last_sequence</code> 为什么取 <code>max</code>?</strong> manifest 里存的是<strong>上次 flush 时</strong>的 last_sequence——那之后、崩溃前的写都还在 WAL 里(没进 SST,所以没进 manifest)。这些 WAL 记录带着更高的 seq。所以 manifest 给"地板",WAL replay 把它<strong>续到</strong>真正的最高水位。漏了这个 max,重启后新写的 seq 会和未 flush 的旧写撞号,破坏多版本定序。</div>
+
+  <h2>flush:发一条 edit,定一个提交点</h2>
+  <p>旧 <code>flush</code> 是"写 SST → 截 WAL"。现在中间多一条<strong>记账</strong>,三个动作的顺序就是崩溃安全的全部:</p>
+  <div class="seq">
+    1. 写 SST 文件,fsync                              <span class="c">// 数据先落盘</span><br>
+    <span class="commit">2. manifest.append_edit(&amp;edit),fsync             ← 提交点</span><br>
+    3. 截断 WAL + 更新内存                              <span class="c">// 只有 manifest 认账了才敢丢 WAL</span>
+  </div>
+  <pre>    <span class="k">pub fn</span> <span class="f">flush</span>(&amp;<span class="k">mut</span> self) -> Result&lt;()&gt; {
+        <span class="k">if</span> self.mem.<span class="f">is_empty</span>() { <span class="k">return</span> Ok(()); }
+        <span class="c">// (1) 写 SST,fsync(在 finish() 内)。号从共享计数器取。</span>
+        <span class="k">let</span> num = self.next_file_number; self.next_file_number += 1;
+        <span class="k">let</span> path = <span class="f">sst_path</span>(&amp;self.dir, num);
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">new</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> self.mem.<span class="f">iter</span>() { b.<span class="f">add</span>(&amp;k, &amp;v); }
+        b.<span class="f">finish</span>(&amp;path)?;
+
+        <span class="c">// (2) 记账并 fsync —— 这条 fsync 是提交点。</span>
+        <span class="k">let</span> <span class="k">mut</span> edit = VersionEdit::<span class="f">new</span>();
+        edit.new_files = vec![num];
+        edit.next_file_number = Some(self.next_file_number);
+        edit.last_sequence = Some(self.seq);
+        self.manifest.<span class="f">append_edit</span>(&amp;edit)?;
+
+        <span class="c">// (3) 此刻才安全:更新内存视图、丢 WAL。</span>
+        self.version.<span class="f">apply</span>(&amp;edit);
+        self.ssts.<span class="f">insert</span>(0, SstReader::<span class="f">open</span>(&amp;path)?);
+        self.wal = Wal::<span class="f">reset</span>(&amp;self.dir.<span class="f">join</span>(<span class="s">"wal.log"</span>))?;
+        self.mem = MemTable::<span class="f">new</span>();
+
+        <span class="c">// 体积过阈轮换(与 open-time checkpoint 同一台机器)。</span>
+        <span class="k">if</span> self.manifest.<span class="f">size</span>() > self.max_manifest_size { self.<span class="f">rotate_manifest</span>()?; }
+        Ok(())
+    }
+
+    <span class="k">fn</span> <span class="f">rotate_manifest</span>(&amp;<span class="k">mut</span> self) -> Result&lt;()&gt; {
+        <span class="k">let</span> manifest_num = self.next_file_number; self.next_file_number += 1;
+        self.manifest = Manifest::<span class="f">install</span>(&amp;self.dir, manifest_num, &amp;self.version, self.next_file_number, self.seq)?;
+        Ok(())
+    }</pre>
+  <h3>崩在每个点,都不丢数据</h3>
+  <table>
+    <thead><tr><th>崩在哪</th><th>磁盘状态</th><th>恢复结果</th></tr></thead>
+    <tbody>
+      <tr><td>(1)后 (2)前</td><td>SST 在盘但 manifest 没记</td><td>SST 成<strong>孤儿</strong>(不在 Version);数据仍在 <strong>WAL</strong>,replay 补回 ✅</td></tr>
+      <tr><td>(2)后 (3)前</td><td>SST 进 Version <strong>且</strong> WAL 还在</td><td>manifest 给 SST;WAL 把同批 KV 按原 seq 再灌回 mem;<strong>按 seq 去重幂等</strong> ✅</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:.92em;color:var(--soft)"><strong>孤儿 + 文件号复用</strong>(讲但不治):崩在 (1)(2) 之间,号 <code>num</code> 没持久化进 manifest,下次 open 的 <code>next_file_number</code> 是旧值,可能<strong>复用 <code>num</code> 覆盖那个孤儿</strong>。安全,因为孤儿的数据还在 WAL、覆盖无损。孤儿文件的<strong>物理回收</strong>是 Phase X 的 <code>DeleteObsoleteFiles</code>;本期靠 WAL 兜底,只讲不治。<strong>WAL 仍整截</strong>(不引入 log number 标记法,那也是 Phase X)。</p>
+
+  <h2>🧠 System mindset:提交点 —— 元数据也走 write-ahead</h2>
+  <p>看这个对称:</p>
+  <table>
+    <thead><tr><th></th><th>谁的提交记录</th><th>提交点</th><th>提交前崩 → 视为没发生</th></tr></thead>
+    <tbody>
+      <tr><td>一次 <strong>put</strong></td><td>WAL 记录</td><td>WAL 那条 fsync</td><td>数据不进 memtable</td></tr>
+      <tr><td>一次 <strong>flush</strong></td><td>manifest VersionEdit</td><td>edit 那条 fsync</td><td>SST 成孤儿,当没 flush 过</td></tr>
+    </tbody>
+  </table>
+  <p><strong>同一招,两个层级。</strong> 用户数据靠 WAL 先写日志扛崩溃;<strong>元数据(哪些文件构成数据库)靠 MANIFEST 先写日志扛崩溃</strong>。一次 flush 的"原子提交点"不是"写完 SST"——SST 写完但没记账,等于没发生——而是"manifest edit 落盘"。这是 <strong>write-ahead logging</strong> 的精髓:<strong>先把"我要做什么"持久化成一条日志记录,再去做;那条记录的 fsync 就是不可逆的提交线,线之前一切可当作没发生过而安全回滚。</strong></p>
+  <p><strong>迁移收获:</strong>数据库事务的 redo-before-data、文件系统 journaling 的 journal-commit-before-checkpoint、2PC 的 prepare→commit、甚至 TCP 的"ack 才算送达"——都是同一个骨架:<strong>把"生效"绑定到一个单一、持久、原子的提交标记上。</strong>设计任何"多步骤、中途可能崩"的操作,先问:<em>我的提交点是哪一行?它之前的步骤都可重做吗?</em></p>
+  <div class="src">RocksDB 锚: db/version_set.cc VersionSet::LogAndApply(把 edit 写进 MANIFEST = 一次原子的元数据提交)</div>
+
+  <h2>🧪 Harness + 🔄 CI/CD:孤儿 SST 回归守卫</h2>
+  <p>本课旗舰 harness 也是这条流水线的关键守卫:<strong>证明扫盘真的死透了。</strong>构造一个目录里物理存在、但 manifest 从未记录的 SST,断言引擎<strong>读不到它</strong>——若引擎还在偷偷扫目录,这个孤儿就会被读出来,测试就红。</p>
+  <div class="harness">
+    <div class="kicker">三条性质</div>
+    <p style="margin:.3em 0 0">① <strong>经 manifest 重开</strong>:put 几个、flush(进 manifest)、再 put(留 WAL),重开后全部读回(SST + WAL 两路)。② <strong>孤儿 SST 不可见</strong>:flush 后手工伪造一个合法 SST 丢进目录(manifest 未记),重开断言它的 key 读不到、真数据照常。③ <strong>文件号跨重开单调</strong>:重开后再 flush 不复用号、不覆盖旧 SST。</p>
+  </div>
+  <pre>    <span class="c">#[test]</span> <span class="c">// 头牌回归:引擎信 manifest、不信目录</span>
+    <span class="k">fn</span> <span class="f">orphan_sst_is_ignored</span>() {
+        { <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();
+          e.<span class="f">put</span>(<span class="s">"real"</span>.., <span class="s">"yes"</span>..).<span class="f">unwrap</span>(); e.<span class="f">flush</span>().<span class="f">unwrap</span>(); }
+        <span class="c">// 伪造一个完全合法、但 manifest 从未提及的 SST</span>
+        <span class="k">let</span> <span class="k">mut</span> forged = SstBuilder::<span class="f">new</span>();
+        forged.<span class="f">add</span>(b<span class="s">"ghost"</span>, b<span class="s">"boo"</span>);
+        forged.<span class="f">finish</span>(&amp;dir.<span class="f">join</span>(<span class="s">"999999.sst"</span>)).<span class="f">unwrap</span>();
+
+        <span class="k">let</span> e2 = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"real"</span>).<span class="f">as_deref</span>(), Some(&amp;b<span class="s">"yes"</span>[..]));
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"ghost"</span>), None, <span class="s">"孤儿 SST 不可被读到"</span>);   <span class="c">// 扫盘若没死,这里会红</span>
+    }</pre>
+  <div class="cicd">
+    <div class="kicker">本课增量</div>
+    <p style="margin:.3em 0 0">孤儿守卫 + 端到端重开测试并入 <code>cargo test --all</code>。三课叠完,这条流水线现在自动守护引擎三类最难肉眼复查的正确性:<strong>磁盘格式可逆(L1)· 元数据崩溃一致(L2)· 权威来源是 manifest 而非目录(L3)</strong>。删 <code>discover_ssts</code> 这种"删掉一段还在跑的旧逻辑"的重构,有了孤儿守卫兜底才敢放心做——这正是回归测试的本职:<strong>让删代码和加代码一样安全。</strong></p>
+  </div>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo clippy --all-targets -- -D warnings</div>
+  <div class="done"><div class="kicker">L3 判定 — 全绿 · Phase L 收官</div><p style="margin:.3em 0 0"><code>survives_reopen_via_manifest ... ok</code> · <code>orphan_sst_is_ignored ... ok</code> · <code>file_numbers_monotonic_across_reopen ... ok</code><br>+ 既有 D/E/.../K 引擎测试全回归 · <code>discover_ssts</code> 已删<br>clippy 0 warning · fmt 干净</p></div>
+
+  <div class="milestone">🏁 <strong>Phase L 收官:引擎有了权威元数据。</strong> <code>open</code> 读账本不再扫盘、<code>flush</code> 走元数据 write-ahead、文件号与 seq 都从 manifest 恢复、CURRENT 原子切换扛住崩溃。这是 <strong>Tier 3 Compaction 的地基</strong>:compaction 要"删一批旧文件、加一批新文件",而"删文件"这个动作,正是靠本期建好的 <code>VersionEdit.deleted_files</code> + Version fold 的移除分支来表达的。<strong>下一站 Phase M:分层布局(L0 可重叠 / L1..Ln 不重叠)</strong>——给 Version 装上 level,本期那个"号序=新旧"的假设到那里会被正式打破。</div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">L3 想透这几个</div>
+    <ol>
+      <li><strong>为什么 flush 的提交点是"manifest edit 落盘"而非"SST 写完"?</strong> 把排序改成"先记 manifest 再写 SST"会出什么事?</li>
+      <li><strong><code>open</code> 现在每次都写新 MANIFEST(带写副作用),这跟"open 应该只读"的直觉冲突——为什么这个副作用是对的、甚至是必要的?</strong></li>
+      <li><strong>孤儿 SST 测试如果失败(ghost 被读到),说明引擎哪里还在偷偷依赖目录?</strong> 为什么这条测试是"扫盘已死"的充分证据?</li>
+      <li><strong><code>last_sequence = max(manifest, WAL replay)</code>:举一个具体的 put/flush/崩溃序列,说明若漏掉 <code>max</code>、只取 manifest 值,会怎样撞 seq、破坏什么?</strong></li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一站:Phase M — 分层布局。</strong> 本期 Version 是"一袋文件",读序靠文件号。Phase M 把它结构化成 <code>L0(可重叠) + L1..Ln(每层内 key 区间不重叠)</code>,<code>FileMetaData</code> 这才需要 L1 推迟掉的 <strong>key 区间 + level</strong> 字段(VersionEdit 加两个新 tag 即可,老格式不破——这就是当初选 tag 化的回报)。然后 Phase N 的 compaction picker 才有"层"可选。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/version_set.cc">version_set.cc</a>(LogAndApply / Recover)。</p>
+    <p>三课全绿,Phase L 收官。说"开始 Phase M"继续,或想完核心问题跟我对答案。</p>
+  </div>
+</div>
+</body>
+</html>

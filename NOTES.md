@@ -73,3 +73,11 @@
   ② ★ 单线程同步 vs 多线程 基准 A/B:吞吐 / p99 / 写停顿 三指标。
 - 锚:db_impl_compaction_flush.cc · write_thread.cc(JoinBatchGroup) · env_posix 线程池。
 - harness:并发 oracle + 性能 A/B 回归 gate。M4 milestone + Tier4 tier-sub 同步更新。
+
+## Phase L Manifest (Lab 0013) 已建 (2026-06-29) — Tier 3 起步
+- grilling 裁决:① 扁平(不引入 level,分层留 M;VersionEdit tag 化,M 加字段只多 tag)。② 抽共享 `log` 模块(wal.rs 重构成 log+KV 客户;MANIFEST=log+VersionEdit 客户;torn-tail 白嫖)。③ CURRENT 讲透:open 强制 checkpoint + 体积过阈轮换,两触发点共用一套原子 install。④ 旧 manifest/孤儿 SST 物理回收 → 诚实推迟 Phase X GC。⑤ VersionEdit 收 add+delete(delete 现无调用者,但折叠移除分支是 L2 核心,合成 edit 测),level/key-range 推迟 M。⑥ flush 排序 SST→manifest edit(提交点)→截 WAL,孤儿"讲但不治"靠 WAL 兜底。⑦ next_sst→共享 next_file_number;last_sequence=max(manifest,WAL replay)。
+- 三课:L1 log+VersionEdit(round-trip harness) / L2★ Version 折叠+recover+install(旗舰=元数据崩溃恢复 a/b1/b2/c,第 9 种 harness 系统) / L3 接 Engine 扫盘 discover_ssts 退役(孤儿 SST 回归守卫)。
+- 🧠 锚:L1 一切皆日志(log_writer/reader 复用) · L2★ 原子指针切换三粒度阶梯(字级 CAS/指针级 Arc-SuperVersion/文件级 rename)显式连 backlog 无锁发布(research-backlog-concurrent-memtable),RocksDB SetCurrentFile 逐行对应 · L3 提交点/元数据 write-ahead(LogAndApply)。
+- 参考实现 job-tmp 沙箱(lphase)验证:cargo test --all 15 绿(7 单元+8 集成)+ clippy -D warnings 干净 + fmt 干净。沙箱用简化 plain-KV memtable+扁平 SST 聚焦 manifest;manifest 栈四模块(log/version_edit/version/manifest)对真引擎逐字可落地,engine 集成为示意(需适配 InternalKey+imm)。reference/ 含全部 + README。
+- 隔离:worktree lectures-phase-l(分支 phase-l-manifest,从 main 24e6a5b),待用户 merge。lesson 在 0013-phase-l-manifest/。roadmap L 标 now、当前位置段 + lab 索引同步更新。
+- 下一:Phase M 分层布局(L0 可重叠/L1..Ln 不重叠),给 Version 装 level,"号序=新旧"假设在此打破;FileMetaData 加 key 区间+level(VersionEdit 加 tag,老格式不破)。

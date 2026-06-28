@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L1 · 共享 log 模块 + VersionEdit</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .cicd{background:#f0eef6;border:1px solid #d3cce0;border-left:4px solid #6a4c93;padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .cicd .kicker{color:#6a4c93}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">Phase L</a> &nbsp;·&nbsp; L1 &nbsp;·&nbsp; <a href="l2-recovery-current.html">L2 →</a></div>
+
+  <div class="kicker">TIER 3 · PHASE L · L1</div>
+  <h1>共享 <code>log</code> 模块 + VersionEdit — MANIFEST 的两块地基</h1>
+  <p>K 收官,M2 多版本引擎达成。进入 <strong>Tier 3 — Compaction</strong>。但在归并文件之前,引擎得先<strong>知道自己到底有哪些文件</strong>——而现在它是靠<strong>扫目录猜</strong>的(<code>discover_ssts</code>:列出 <code>*.sst</code>、按号排序、<code>max+1</code> 当下一个号)。这是 Phase C 就埋下的"故意空洞"。Phase L 把它换成 RocksDB 的做法:一份<strong>权威元数据日志 MANIFEST</strong>,记录"哪些文件活着"。</p>
+  <p>L1 打两块地基:① 把 WAL 的<strong>记录帧</strong>抽成一个 payload-无关的 <code>log</code> 模块——因为 <strong>MANIFEST 就是另一个日志文件,复用同一套帧</strong>;② <code>VersionEdit</code>——一条"文件集增量"的 tag 化记录,就是 MANIFEST 里 append 的那一条条 payload。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">① 新建 <code>src/log.rs</code>:把 <code>wal.rs</code> 里 <code>crc+len+payload</code> 的帧 + torn-tail 容错抽出来,成 <code>LogWriter::append(&amp;[u8])</code> / <code>log::read_all(path)</code>,payload 无关。重构 <code>wal.rs</code> 用它。② 新建 <code>src/version_edit.rs</code>:<code>VersionEdit{ new_files, deleted_files, next_file_number, last_sequence }</code> + tag 化 <code>encode/decode</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> <code>wal.rs</code> 重构后既有 WAL 测试全回归(帧没变,只是搬了家);VersionEdit 任意字段组合 <code>decode(encode(e)) == e</code>;把一串 VersionEdit 当 payload 写进一个 log 文件、再 <code>read_all</code> + <code>decode</code> 能逐条还原(MANIFEST 的雏形)。</p>
+  </div>
+
+  <h2>为什么"扫盘猜"不够</h2>
+  <p><code>discover_ssts</code> 在 MVP 阶段顶得很好,但它有三宗根本性的不足,每一宗都指向"需要一份权威记录":</p>
+  <table>
+    <thead><tr><th>扫盘的问题</th><th>后果</th><th>MANIFEST 怎么解</th></tr></thead>
+    <tbody>
+      <tr><td>文件号靠 <code>max+1</code> 现推</td><td>崩溃后若有"写了一半没记账"的文件,号可能撞、可能覆盖</td><td>把 <code>next_file_number</code> 持久化,启动直接读</td></tr>
+      <tr><td>只能表达"有哪些文件",<strong>无法表达"删了哪个"</strong></td><td>compaction(Phase N)要丢弃被归并的旧文件,扫盘模型根本没有"删除"这个动作</td><td>VersionEdit 带 <code>deleted_files</code> 增量</td></tr>
+      <tr><td>没地方记 <code>last_sequence</code> 等全局状态</td><td>seq 只能靠扫 WAL/SST 重新推断</td><td>全局状态作为 edit 字段落盘</td></tr>
+    </tbody>
+  </table>
+  <p>本质:<strong>目录列表只是"文件的物理存在",而引擎需要的是"逻辑上哪些文件构成当前数据库"</strong>——这两者在 compaction 出现后会分叉(物理上文件还在,逻辑上已被取代)。MANIFEST 记的是后者。</p>
+
+  <h2>地基一:framing ≠ payload</h2>
+  <p>看一眼现在的 <code>wal.rs</code>:<code>append(key,value)</code> 把 KV 拼成 payload,外面再套 <code>crc+len</code> 帧。<strong>帧逻辑和 KV 编码是缠在一起的</strong>。但 MANIFEST 需要的是<strong>同一套帧、不同的 payload</strong>(payload 是 VersionEdit 而非 KV)。RocksDB 正是这么做的:<code>db/log_writer.cc</code> 一套 writer,WAL 和 MANIFEST 都用它。</p>
+  <table>
+    <thead><tr><th></th><th>帧(framing)</th><th>载荷(payload)</th></tr></thead>
+    <tbody>
+      <tr><td>WAL</td><td rowspan="2"><code>crc32 + len + bytes</code><br>torn-tail 容错<br>(共享 <code>log</code> 模块)</td><td><code>seq + klen + k + vlen + v</code></td></tr>
+      <tr><td>MANIFEST</td><td>序列化的 <code>VersionEdit</code></td></tr>
+    </tbody>
+  </table>
+  <p>所以第一步是<strong>解耦</strong>:把帧抽进 <code>log</code>,让 <code>wal.rs</code> 退化成"KV 编解码 + 调 log",MANIFEST 将来就是"VersionEdit 编解码 + 调 log"。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>src/log.rs</code>(「代码 1」),<code>lib.rs</code> 加 <code>pub mod log;</code>。</li>
+    <li>重构 <code>src/wal.rs</code>(「代码 2」):删掉自己的 <code>crc+len</code> 帧,改持 <code>LogWriter</code> / 调 <code>log::read_all</code>;<code>append</code> 只管拼 KV payload。既有 WAL 测试应原样回归。</li>
+    <li>新建 <code>src/version_edit.rs</code>(「代码 3」),<code>lib.rs</code> 加 <code>pub mod version_edit;</code>。</li>
+    <li>敲入「代码 4」两条 harness,<code>cargo test</code> 全绿、<code>cargo clippy -- -D warnings</code> 干净。</li>
+  </ol>
+
+  <h3>代码 1 — 共享帧 log.rs</h3>
+  <pre>    <span class="c">//! frame = crc32(4) + payload_len(4) + payload。payload 无关。</span>
+    <span class="k">pub struct</span> <span class="t">LogWriter</span> { w: BufWriter&lt;File&gt; }
+
+    <span class="k">impl</span> <span class="t">LogWriter</span> {
+        <span class="k">pub fn</span> <span class="f">open_append</span>(path: &amp;Path) -> Result&lt;Self&gt; {
+            <span class="k">let</span> f = OpenOptions::<span class="f">new</span>().<span class="f">create</span>(<span class="k">true</span>).<span class="f">append</span>(<span class="k">true</span>).<span class="f">open</span>(path)?;
+            Ok(Self { w: BufWriter::<span class="f">new</span>(f) })
+        }
+        <span class="k">pub fn</span> <span class="f">create_truncate</span>(path: &amp;Path) -> Result&lt;Self&gt; {       <span class="c">// 轮换/reset 用</span>
+            <span class="k">let</span> f = OpenOptions::<span class="f">new</span>().<span class="f">create</span>(<span class="k">true</span>).<span class="f">write</span>(<span class="k">true</span>).<span class="f">truncate</span>(<span class="k">true</span>).<span class="f">open</span>(path)?;
+            Ok(Self { w: BufWriter::<span class="f">new</span>(f) })
+        }
+        <span class="c">// 追加一条不透明记录——payload 的 schema 是调用方的事</span>
+        <span class="k">pub fn</span> <span class="f">append</span>(&amp;<span class="k">mut</span> self, payload: &amp;[u8]) -> Result&lt;()&gt; {
+            <span class="k">let</span> crc = crc32fast::<span class="f">hash</span>(payload);
+            self.w.<span class="f">write_all</span>(&amp;crc.<span class="f">to_le_bytes</span>())?;
+            self.w.<span class="f">write_all</span>(&amp;(payload.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>())?;
+            self.w.<span class="f">write_all</span>(payload)?;
+            Ok(())
+        }
+        <span class="k">pub fn</span> <span class="f">sync</span>(&amp;<span class="k">mut</span> self) -> Result&lt;()&gt; {
+            self.w.<span class="f">flush</span>()?; self.w.<span class="f">get_ref</span>().<span class="f">sync_all</span>()?; Ok(())  <span class="c">// buffer→OS→disk</span>
+        }
+    }
+
+    <span class="c">// 读出全部完好记录,遇撕裂/损坏停在尾部(容半写尾)。文件不存在 → 空。</span>
+    <span class="k">pub fn</span> <span class="f">read_all</span>(path: &amp;Path) -> Result&lt;Vec&lt;Vec&lt;u8&gt;&gt;&gt; {
+        <span class="k">let</span> <span class="k">mut</span> buf = Vec::<span class="f">new</span>();
+        <span class="k">match</span> File::<span class="f">open</span>(path) {
+            Ok(<span class="k">mut</span> f) => { f.<span class="f">read_to_end</span>(&amp;<span class="k">mut</span> buf)?; }
+            Err(e) <span class="k">if</span> e.<span class="f">kind</span>() == ErrorKind::NotFound => <span class="k">return</span> Ok(vec![]),
+            Err(e) => <span class="k">return</span> Err(e.<span class="f">into</span>()),
+        }
+        <span class="k">let</span> (<span class="k">mut</span> out, <span class="k">mut</span> pos) = (Vec::<span class="f">new</span>(), 0);
+        <span class="k">while</span> pos + 8 &lt;= buf.<span class="f">len</span>() {
+            <span class="k">let</span> crc = u32::<span class="f">from_le_bytes</span>(buf[pos..pos+4].<span class="f">try_into</span>().<span class="f">unwrap</span>());
+            <span class="k">let</span> len = u32::<span class="f">from_le_bytes</span>(buf[pos+4..pos+8].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> usize;
+            <span class="k">let</span> start = pos + 8;
+            <span class="k">if</span> start + len > buf.<span class="f">len</span>() { <span class="k">break</span>; }              <span class="c">// 没写全 → 撕裂尾</span>
+            <span class="k">let</span> payload = &amp;buf[start..start+len];
+            <span class="k">if</span> crc32fast::<span class="f">hash</span>(payload) != crc { <span class="k">break</span>; }     <span class="c">// 损坏</span>
+            out.<span class="f">push</span>(payload.<span class="f">to_vec</span>());
+            pos = start + len;
+        }
+        Ok(out)
+    }</pre>
+
+  <h3>代码 2 — wal.rs 瘦身(现在只管 KV payload)</h3>
+  <pre>    <span class="k">use</span> crate::log::{self, LogWriter};
+    <span class="k">pub struct</span> <span class="t">Wal</span> { w: LogWriter }            <span class="c">// 不再自己持 BufWriter / 写 crc</span>
+
+    <span class="k">impl</span> <span class="t">Wal</span> {
+        <span class="k">pub fn</span> <span class="f">open_append</span>(p: &amp;Path) -> Result&lt;Self&gt; { Ok(Self { w: LogWriter::<span class="f">open_append</span>(p)? }) }
+        <span class="k">pub fn</span> <span class="f">reset</span>(p: &amp;Path) -> Result&lt;Self&gt; { Ok(Self { w: LogWriter::<span class="f">create_truncate</span>(p)? }) }
+        <span class="k">pub fn</span> <span class="f">sync</span>(&amp;<span class="k">mut</span> self) -> Result&lt;()&gt; { self.w.<span class="f">sync</span>() }
+
+        <span class="k">pub fn</span> <span class="f">append</span>(&amp;<span class="k">mut</span> self, seq: u64, key: &amp;[u8], value: &amp;[u8]) -> Result&lt;()&gt; {
+            <span class="k">let</span> <span class="k">mut</span> p = Vec::<span class="f">new</span>();                        <span class="c">// payload = seq|klen|k|vlen|v</span>
+            p.<span class="f">extend_from_slice</span>(&amp;seq.<span class="f">to_le_bytes</span>());
+            p.<span class="f">extend_from_slice</span>(&amp;(key.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>()); p.<span class="f">extend_from_slice</span>(key);
+            p.<span class="f">extend_from_slice</span>(&amp;(value.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>()); p.<span class="f">extend_from_slice</span>(value);
+            self.w.<span class="f">append</span>(&amp;p)                            <span class="c">// 帧的事全交给 log</span>
+        }
+        <span class="k">pub fn</span> <span class="f">replay</span>(p: &amp;Path) -> Result&lt;Vec&lt;(u64, Bytes, Bytes)&gt;&gt; {
+            <span class="k">let</span> <span class="k">mut</span> out = Vec::<span class="f">new</span>();
+            <span class="k">for</span> rec <span class="k">in</span> log::<span class="f">read_all</span>(p)? { out.<span class="f">push</span>(<span class="f">decode</span>(&amp;rec)?); }  <span class="c">// log 吐完好记录,这里只解 KV</span>
+            Ok(out)
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">注意 <code>append</code> 现在多带了一个 <code>seq</code>——这是 H 阶段引入 InternalKey 后 WAL 本就该存的(replay 要恢复 seq)。重构顺手把签名对齐。<strong>关键是帧逻辑彻底没了:</strong>crc、长度、torn-tail 全下沉到 <code>log</code>,<code>wal.rs</code> 只剩 KV schema。</p>
+
+  <h3>代码 3 — VersionEdit(version_edit.rs)</h3>
+  <pre>    <span class="c">// 字段 tag。预留空间;Phase M 加 level/key-range 只是新增 tag。</span>
+    <span class="k">const</span> TAG_NEXT_FILE_NUMBER: u8 = 1;
+    <span class="k">const</span> TAG_LAST_SEQUENCE: u8 = 2;
+    <span class="k">const</span> TAG_NEW_FILE: u8 = 3;
+    <span class="k">const</span> TAG_DELETED_FILE: u8 = 4;
+
+    <span class="c">// 一条对当前 Version 的增量。字段稀疏:只带变化的部分。</span>
+    <span class="c">#[derive(Debug, Default, Clone, PartialEq, Eq)]</span>
+    <span class="k">pub struct</span> <span class="t">VersionEdit</span> {
+        <span class="k">pub</span> new_files: Vec&lt;u64&gt;,        <span class="c">// 本 edit 新增的 SST</span>
+        <span class="k">pub</span> deleted_files: Vec&lt;u64&gt;,    <span class="c">// 本 edit 删除的 SST(compaction 起,Phase N+)</span>
+        <span class="k">pub</span> next_file_number: Option&lt;u64&gt;,
+        <span class="k">pub</span> last_sequence: Option&lt;u64&gt;,
+    }
+
+    <span class="k">impl</span> <span class="t">VersionEdit</span> {
+        <span class="c">// 编码 = 一串 (tag, 值)。数值用定长 u64 LE(RocksDB 用 varint,这里求简单清晰)。</span>
+        <span class="k">pub fn</span> <span class="f">encode</span>(&amp;self) -> Vec&lt;u8&gt; {
+            <span class="k">let</span> <span class="k">mut</span> out = Vec::<span class="f">new</span>();
+            <span class="k">if let</span> Some(n) = self.next_file_number { out.<span class="f">push</span>(TAG_NEXT_FILE_NUMBER); out.<span class="f">extend_from_slice</span>(&amp;n.<span class="f">to_le_bytes</span>()); }
+            <span class="k">if let</span> Some(s) = self.last_sequence    { out.<span class="f">push</span>(TAG_LAST_SEQUENCE);   out.<span class="f">extend_from_slice</span>(&amp;s.<span class="f">to_le_bytes</span>()); }
+            <span class="k">for</span> &amp;f <span class="k">in</span> &amp;self.new_files     { out.<span class="f">push</span>(TAG_NEW_FILE);     out.<span class="f">extend_from_slice</span>(&amp;f.<span class="f">to_le_bytes</span>()); }
+            <span class="k">for</span> &amp;f <span class="k">in</span> &amp;self.deleted_files { out.<span class="f">push</span>(TAG_DELETED_FILE); out.<span class="f">extend_from_slice</span>(&amp;f.<span class="f">to_le_bytes</span>()); }
+            out
+        }
+        <span class="c">// 解码 = 按 tag 分派,每个 tag 自管自己的 codec。新增字段 = 多一个 match 臂。</span>
+        <span class="k">pub fn</span> <span class="f">decode</span>(buf: &amp;[u8]) -> Result&lt;Self&gt; {
+            <span class="k">let</span> (<span class="k">mut</span> edit, <span class="k">mut</span> i) = (VersionEdit::<span class="f">new</span>(), 0);
+            <span class="k">while</span> i &lt; buf.<span class="f">len</span>() {
+                <span class="k">let</span> tag = buf[i]; i += 1;
+                <span class="k">match</span> tag {
+                    TAG_NEXT_FILE_NUMBER => edit.next_file_number = Some(<span class="f">read_u64</span>(buf, &amp;<span class="k">mut</span> i)?),
+                    TAG_LAST_SEQUENCE    => edit.last_sequence    = Some(<span class="f">read_u64</span>(buf, &amp;<span class="k">mut</span> i)?),
+                    TAG_NEW_FILE     => edit.new_files.<span class="f">push</span>(<span class="f">read_u64</span>(buf, &amp;<span class="k">mut</span> i)?),
+                    TAG_DELETED_FILE => edit.deleted_files.<span class="f">push</span>(<span class="f">read_u64</span>(buf, &amp;<span class="k">mut</span> i)?),
+                    other => <span class="f">bail!</span>(<span class="s">"unknown VersionEdit tag {other}"</span>),
+                }
+            }
+            Ok(edit)
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>为什么 <code>deleted_files</code> 现在就要?</strong> Phase L 没有任何东西删文件(删文件是 compaction,Phase N)。但"删除"恰恰是 <em>edit</em> 这个设计的灵魂——若只会"加",那直接存一个文件列表就够了,何必搞增量日志?<strong>正因为将来要"加一些、减一些",才用 delta。</strong>删除分支现在就建好、用合成 edit 测(下一课 L2 的 Version fold 会真正消费它),Phase N 直接拿来用。这与"惰性字段(level/key-range)推迟到 M"不矛盾:那些这期<strong>没有行为</strong>,而 delete 是 L2 折叠的核心行为。</p>
+
+  <h2>🧰 Coding style:解耦 · 可扩展协议 · 稀疏增量</h2>
+  <ul>
+    <li><strong>framing ≠ payload</strong>:把"怎么把一段字节安全存进文件"(帧:长度、校验、容错)和"这段字节是什么"(schema:KV / VersionEdit)分到两层。一旦分开,新载荷(MANIFEST)就能<strong>零成本复用</strong>整套帧 + 容错。判据:<em>当两个东西"存储方式相同、内容不同",存储方式就该独立成层。</em></li>
+    <li><strong>tag 化协议,为扩展而设计</strong>:不用定长 struct,用 <code>tag + 值</code> 的自描述流。加字段 = 加一个 tag 常量 + 一个 match 臂,老数据照样解。这是所有要长期演进的磁盘/网络格式的通用形态(Protobuf field number、TLV、BSON 都是这个骨架)。</li>
+    <li><strong>稀疏增量(Option 字段)</strong>:一条 edit 只编码<strong>变了的</strong>字段。flush 的 edit 只带 <code>new_files + 两个计数器</code>,不带 delete。这让"edit = 一个 delta"在编码层就是字面真相,而非全量快照。</li>
+  </ul>
+
+  <h2>🧠 System mindset:一切皆日志(state = fold(events))</h2>
+  <p>MANIFEST 不是一张"当前文件表",而是<strong>一串增量事件的 append-only 日志</strong>;当前文件集 = 从头把这些事件<strong>折叠</strong>一遍的结果(下一课 L2 的 <code>Version::apply</code>)。这正是 <strong>event sourcing</strong> 的核心:不存当前状态,存导致状态的事件流,状态是事件的折叠。一旦你认出这个形,到处都是它:</p>
+  <table>
+    <thead><tr><th>系统</th><th>append-only 事件</th><th>当前状态 = fold(events)</th></tr></thead>
+    <tbody>
+      <tr><td>RocksDB / 本项目</td><td>MANIFEST 里的 VersionEdit</td><td>Version(活文件集)</td></tr>
+      <tr><td>Git</td><td>commit 对象(只追加)</td><td>HEAD 指向的树 = 历史折叠</td></tr>
+      <tr><td>Kafka</td><td>分区 log</td><td>consumer 折叠出的物化视图</td></tr>
+      <tr><td>数据库 redo log</td><td>事务 redo 记录</td><td>重放恢复出的页</td></tr>
+      <tr><td>会计 / 区块链</td><td>分录 / 交易</td><td>余额 = 全部分录之和</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获:</strong>当你纠结"该存当前状态还是状态变更"时,日志派的答案几乎总更稳——<strong>事件不可变、可追加、可重放、可审计</strong>,而"当前状态"只是一个可随时从日志重建的缓存。RocksDB 把 WAL 和 MANIFEST 都建在同一个 <code>log_writer</code> 上,不是巧合:<strong>KV 数据和元数据,都用"先写日志"这一招扛崩溃。</strong></p>
+  <div class="src">RocksDB 锚: db/log_writer.cc · db/log_reader.cc(WAL 与 MANIFEST 复用同一套 log writer/reader)</div>
+
+  <h2>🧪 Harness 系统:编码 round-trip + 日志 torn-tail</h2>
+  <div class="harness">
+    <div class="kicker">两条性质</div>
+    <p style="margin:.3em 0 0">① <strong>VersionEdit round-trip</strong>:任意字段组合(全字段 / 只 add+计数器的 flush edit / 空 edit),<code>decode(encode(e)) == e</code>。这把磁盘格式钉成可逆,是后面一切恢复正确的前提。② <strong>日志 torn-tail(白嫖 WAL)</strong>:往 log 写几条记录,<code>set_len</code> 砍掉尾几字节,<code>read_all</code> 应<strong>吐出撕裂前的前缀、丢残尾、不 panic</strong>。这条性质 MANIFEST 直接继承——半写的 VersionEdit = 撕裂的尾记录。</p>
+  </div>
+  <h3>代码 4 — harness</h3>
+  <pre>    <span class="c">#[test]</span> <span class="c">// VersionEdit 全字段 round-trip</span>
+    <span class="k">fn</span> <span class="f">roundtrip_full_edit</span>() {
+        <span class="k">let</span> <span class="k">mut</span> e = VersionEdit::<span class="f">new</span>();
+        e.new_files = vec![7, 8, 9]; e.deleted_files = vec![3];
+        e.next_file_number = Some(10); e.last_sequence = Some(4242);
+        <span class="f">assert_eq!</span>(VersionEdit::<span class="f">decode</span>(&amp;e.<span class="f">encode</span>()).<span class="f">unwrap</span>(), e);
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 日志撕裂尾:丢残尾、留前缀</span>
+    <span class="k">fn</span> <span class="f">torn_tail_drops_last_record</span>() {
+        <span class="k">let</span> p = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"t.log"</span>);
+        { <span class="k">let</span> <span class="k">mut</span> w = LogWriter::<span class="f">open_append</span>(&amp;p).<span class="f">unwrap</span>();
+          w.<span class="f">append</span>(b<span class="s">"keep"</span>).<span class="f">unwrap</span>(); w.<span class="f">append</span>(b<span class="s">"lose-me"</span>).<span class="f">unwrap</span>(); w.<span class="f">sync</span>().<span class="f">unwrap</span>(); }
+        <span class="k">let</span> len = std::fs::<span class="f">metadata</span>(&amp;p).<span class="f">unwrap</span>().<span class="f">len</span>();
+        OpenOptions::<span class="f">new</span>().<span class="f">write</span>(<span class="k">true</span>).<span class="f">open</span>(&amp;p).<span class="f">unwrap</span>().<span class="f">set_len</span>(len - 3).<span class="f">unwrap</span>();  <span class="c">// 撕</span>
+        <span class="f">assert_eq!</span>(log::<span class="f">read_all</span>(&amp;p).<span class="f">unwrap</span>(), vec![b<span class="s">"keep"</span>.<span class="f">to_vec</span>()]);
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo clippy --all-targets -- -D warnings</div>
+  <div class="done"><div class="kicker">L1 判定 — 全绿</div><p style="margin:.3em 0 0"><code>roundtrip_full_edit/sparse/empty ... ok</code> · <code>torn_tail_drops_last_record ... ok</code> · <code>corruption_caught ... ok</code><br>+ 既有 WAL 测试在重构后<strong>原样回归</strong>(帧搬家不改行为)<br>clippy 0 warning · fmt 干净</p></div>
+
+  <h2>🔄 CI/CD:格式可逆性进回归门</h2>
+  <div class="cicd">
+    <div class="kicker">本课增量</div>
+    <p style="margin:.3em 0 0">新 <code>log</code> / <code>version_edit</code> 模块的 round-trip 测试自动并入既有的 <code>cargo test --all</code> 门禁(<code>0004-phase-c-sst/ci-reference.yml</code> 里的 test job)。<strong>关键纪律:磁盘格式一旦进 CI,就被 round-trip 测试"钉死"</strong>——任何未来对编码的改动若破坏可逆性,CI 立刻红。这是"格式即契约"在流水线上的兑现:你给自己上了一道<strong>防止悄悄改坏盘上格式</strong>的锁。L2 的崩溃恢复测试会继续往这道门里加砝码。</p>
+  </div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">L1 想透这几个</div>
+    <ol>
+      <li><strong>为什么 MANIFEST 能和 WAL 复用同一套 <code>log</code>,而不需要各搞一套帧?</strong></li>
+      <li><strong><code>deleted_files</code> 在 Phase L 没有任何真实调用者,为什么现在就编码进去,而 <code>level</code> 字段却推迟到 Phase M?</strong>(提示:哪个承载"这一期要教的行为"?)</li>
+      <li><strong>tag 化编码比"定长 struct 直接 transmute"多付出了什么、换回了什么?</strong>(向前兼容 vs 体积/速度)</li>
+      <li><strong>torn-tail 容错对 MANIFEST 意味着什么?</strong>(半写的一条 VersionEdit 在恢复时会怎样?为什么这恰好是"安全"的——结合 append-only + 折叠语义想)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一站:L2 — Version 折叠 + 恢复 + CURRENT 原子切换。</strong> 有了 log 和 VersionEdit,L2 把一串 edit <strong>折叠</strong>成 Version(活文件集),实现"读 CURRENT → replay 重建",并把"写新 MANIFEST → 原子切 CURRENT"这套<strong>原子安装</strong>讲透——那是整个 Phase L 的旗舰,也是你最在意的"原子发布"系统思维落地的地方。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/log_writer.cc">log_writer.cc</a> · <a href="https://github.com/facebook/rocksdb/blob/main/db/version_edit.cc">version_edit.cc</a>(EncodeTo / DecodeFrom)。</p>
+    <p>敲完三个文件、跑绿,去 <a href="l2-recovery-current.html">L2</a>。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

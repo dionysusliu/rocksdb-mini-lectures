@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>L · Manifest / Version / VersionEdit</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  ul{margin:.5em 0}
+  .lessons{list-style:none;padding:0}
+  .lessons>li{border:1px solid var(--rule);border-left:4px solid var(--accent2);border-radius:4px;padding:12px 18px;margin:.7em 0;background:#fff}
+  .lessons .t{font-size:17px;color:var(--accent2);text-decoration:none;font-weight:bold}
+  .lessons .d{font-size:.9em;color:var(--soft);margin-top:.2em}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../0012-phase-k-scan/index.html">← Phase K</a> &nbsp;·&nbsp; Phase L &nbsp;·&nbsp; <a href="../roadmap.html">roadmap</a></div>
+
+  <div class="kicker">TIER 3 · PHASE L</div>
+  <h1>Manifest / Version / VersionEdit</h1>
+  <p>Tier 2(M2 多版本引擎)收官,进入 <strong>Tier 3 — Compaction</strong>。但在归并文件之前,引擎得先有一份<strong>权威的元数据</strong>知道"哪些文件构成当前数据库"——现在它还在<strong>扫目录猜</strong>(<code>discover_ssts</code>,Phase C 埋的"故意空洞")。Phase L 把扫盘换成 RocksDB 的做法:一份 append-only 的 <strong>MANIFEST</strong> 日志,记一串 <code>VersionEdit</code>(文件集增量),折叠成 <code>Version</code>(活文件集);用 <code>CURRENT</code> 文件 + 原子 <code>rename</code> 扛崩溃。</p>
+
+  <p style="font-size:.92em;color:var(--soft)"><strong>本期裁决(grilling):</strong>① <strong>扁平</strong>——不引入 level,分层完整留给 Phase M(VersionEdit 用 tag 化编码,M 加字段只是多个 tag,老格式不破)。② <strong>共享 <code>log</code> 模块</strong>——把 WAL 的帧抽出来,MANIFEST 复用,torn-tail 容错白嫖。③ <strong>CURRENT 讲透</strong>——open 强制 checkpoint + 体积过阈轮换,两个触发点共用一套原子安装。④ 旧 manifest 物理回收、孤儿文件清理 → 都诚实推迟到 Phase X 文件 GC。</p>
+
+  <h2>三节子课</h2>
+  <ul class="lessons">
+    <li>
+      <a class="t" href="l1-log-versionedit.html">L1 — 共享 log 模块 + VersionEdit</a>
+      <div class="d">把 WAL 的 <code>crc+len+payload</code> 帧抽成 payload-无关的 <code>log</code> 模块;<code>VersionEdit</code> 的 tag 化编解码。🧰 framing≠payload · 🧠 一切皆日志(state=fold(events)) · 🧪 编码 round-trip + 日志 torn-tail。</div>
+    </li>
+    <li>
+      <a class="t" href="l2-recovery-current.html">L2 — Version 折叠 + 恢复 + CURRENT 原子切换 ★</a>
+      <div class="d">一串 edit 折叠成活文件集;读 CURRENT→replay 重建;7 步原子安装(含 fsync 父目录)。🧰 制造-再发布 · 🧠 ★原子指针切换三粒度阶梯(CAS / Arc / rename)+ 并发无锁发布 · 🧪 <strong>元数据崩溃恢复(新 harness 系统)</strong>。</div>
+    </li>
+    <li>
+      <a class="t" href="l3-engine-integration.html">L3 — 接进 Engine,扫盘退役</a>
+      <div class="d">open 用 recover 替换 discover_ssts;flush 发 edit(SST→manifest→WAL 截断的提交点排序);<code>next_sst</code>→共享 <code>next_file_number</code>。🧠 提交点/元数据 write-ahead · 🔄 <strong>孤儿 SST 回归守卫</strong>。</div>
+    </li>
+  </ul>
+
+  <h2>累计 harness 系统</h2>
+  <p>表驱动 · 模型差分 oracle · 不变量 · 故障注入 · 崩溃恢复 · 格式 round-trip · 跨持久化 round-trip · 分层查找差分 · 范围时间旅行 → <strong>+ 元数据崩溃恢复(第 9 种,L2)</strong>:沿原子安装序列注入崩溃,断言恢复永远落在一致状态(全旧/全新)、绝不撕裂。</p>
+
+  <div class="milestone">🏁 <strong>Phase L 收官 = Tier 3 Compaction 的地基。</strong> 有了"加文件/删文件"的增量账本(VersionEdit)和折叠语义(Version),compaction(Phase N/O)才有办法表达"归并掉一批旧文件、产出一批新文件"这个核心动作。<strong>下一站 Phase M:分层布局</strong>,给 Version 装上 level,本期"号序=新旧"的假设到那里被正式打破。</div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/version_set.cc">version_set.cc</a>(Recover / LogAndApply / SetCurrentFile) · <a href="https://github.com/facebook/rocksdb/blob/main/db/version_edit.cc">version_edit.cc</a> · <a href="https://github.com/facebook/rocksdb/blob/main/db/log_writer.cc">log_writer.cc</a>。</p>
+    <p>从 <a href="l1-log-versionedit.html">L1</a> 开始。</p>
+  </div>
+</div>
+</body>
+</html>
