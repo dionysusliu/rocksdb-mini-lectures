@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K · 对外范围扫描 — DBIter + scan_as_of</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../0011-phase-j-snapshot/index.html">← Phase J</a> &nbsp;·&nbsp; Phase K</div>
+
+  <div class="kicker">TIER 2 · PHASE K</div>
+  <h1>对外范围扫描 — DBIter + scan_as_of</h1>
+  <p>J 给<strong>点读</strong>装上了时间旅行(<code>get_as_of</code>)。Phase K 给<strong>范围读</strong>也装上:把 G2 那个"读最新、在归并层去重"的 <code>scan</code>,升级成一个真正对外的游标 <strong><code>DBIter</code></strong>——按 <code>snapshot</code> 过滤版本、按 user_key 取最新可见版本去重、跳墓碑。这正是 RocksDB 的 <code>db_iter.cc</code> 在做的事。K 收尾,引擎的两条读路径(点 + 范围)就都<strong>快照一致 + 墓碑感知</strong>,M2 多版本引擎达成。</p>
+
+  <p style="font-size:.92em;color:var(--soft)"><strong>K 的关键动作是"分层归位":</strong>把"去重 + 快照过滤 + 墓碑跳过"这三件懂语义的事,从底层 <code>MergeIterator</code> 拆出来、搬回 <code>DBIter</code> 层。<code>MergeIterator</code> 退回成纯 k 路归并器(吐<strong>所有</strong>版本),DBIter 在它之上做语义判断——这才是 RocksDB 的真实分工。G2/H2 一度把去重塞进 MergeIterator,是因为当时还没有快照;一旦要按 seq 过滤,就只能在<strong>懂 seq 的那一层</strong>做。</p>
+
+  <h2>一个最小步</h2>
+  <p>本阶段是单课:<a href="k-dbiter.html"><strong>K — DBIter + scan_as_of</strong></a>。</p>
+  <ul>
+    <li><code>DBIter</code>(新模块):包 <code>MergeIterator::new</code>(吐所有版本),上层做 snapshot 过滤 + user_key 去重 + 墓碑跳过。</li>
+    <li><code>Engine::scan_as_of(start, end, snapshot)</code>:范围版时间旅行;<code>scan</code> = <code>scan_as_of(.., self.seq)</code>。</li>
+    <li>把去重逻辑从 MergeIterator 拆回 DBIter,归并层回归纯净。</li>
+  </ul>
+
+  <div class="milestone">🏁 <strong>K 收官 = Tier 2 / M2 多版本引擎全部达成。</strong> InternalKey(H)→ 写路径带 seq(H)→ 墓碑删除(H)→ 点读快照(J)→ 范围读快照(K)。整条读写路径都按版本号运作。下一里程碑 Tier 3:compaction —— 真正回收被遮蔽的旧版本与墓碑,并引入"快照安全水位"。</div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/db_iter.cc">db_iter.cc</a>(DBIter::Next / FindNextUserEntry)。</p>
+    <p>从 <a href="k-dbiter.html">K — DBIter + scan_as_of</a> 开始。</p>
+  </div>
+</div>
+</body>
+</html>

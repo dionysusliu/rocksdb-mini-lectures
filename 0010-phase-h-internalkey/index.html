@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase H · InternalKey(seq + type + 墓碑)</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .cards{display:flex;flex-direction:column;gap:12px;margin:1.4em 0}
+  .card{display:block;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;border-radius:4px;text-decoration:none;color:inherit;background:#fff}
+  .card:hover{border-left-color:var(--accent2);background:#fafdff}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+  .card h3{margin:.2em 0 .3em;font-size:17px}
+  .card .meta{font-size:.84em;color:var(--soft);font-family:ui-monospace,monospace;margin-top:.4em}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0009-phase-g-merge/index.html">Phase G</a> &nbsp;·&nbsp; Phase H</div>
+
+  <div class="kicker">TIER 2 · PHASE H</div>
+  <h1>InternalKey — seq + type + 墓碑</h1>
+  <p>Phase G 的归并靠<strong>源优先级</strong>猜新旧——compaction 把多版本混进一个 SST 后就失灵。Phase H 给每个 key 编上<strong>序列号 seq</strong>(谁新)和<strong>类型 type</strong>(Put/Delete):新旧成为 key 自带、比较器可读的信息,删除成为一种可归并的写(墓碑)。这是从"能存能读"迈向"<strong>多版本语义</strong>"的关键一步,也兑现 A1 埋下的"plain key 不够"张力。</p>
+
+  <p style="font-size:.92em;color:var(--soft)"><strong>设计主线:字节可比编码。</strong> InternalKey = <code>user_key ‖ be(u64::MAX − seq) ‖ [type]</code>,让<strong>裸字节 Ord 直接给出 user_key 升 / seq 降</strong>。于是 memtable(SkipMap 要 <code>K: Ord</code>)、SST 块二分、归并堆<strong>全用默认字节比较、零 comparator 穿线</strong>;唯一"懂 InternalKey"的逻辑收敛到读路径与归并去重(H3)。</p>
+
+  <h2>三个最小步</h2>
+  <div class="cards">
+    <a class="card" href="h1-internalkey.html">
+      <div class="step">STEP H1 · done</div>
+      <h3>InternalKey 编码 + 字节可比</h3>
+      <p><code>internal_key.rs</code>:<code>encode/user_key/seq/value_type/lookup_key</code>。取反 seq 编码让默认 <code>Ord</code> 给出 user_key 升 / seq 降。纯格式,不碰存储。对标 <code>dbformat.h</code>。</p>
+      <div class="meta">harness:round-trip · 排序契约(a@9&lt;a@5&lt;a@3&lt;b@1) · lookup_key 落最新可见</div>
+    </a>
+    <a class="card" href="h2-write-path-seq.html">
+      <div class="step">STEP H2 · done</div>
+      <h3>写路径穿 seq</h3>
+      <p>引擎全局 <code>seq</code> 计数器,每 put 自增;memtable 存 <code>encode(uk, seq, VALUE)</code>;WAL record 带 seq+type(replay 重建版本)。get/scan 顺势改"按 user_key 取最新版本"(否则存 InternalKey 却用 plain key 查会失配)。</p>
+      <div class="meta">harness:写路径 round-trip · seq 单调 · 覆盖写取最新</div>
+    </a>
+    <a class="card" href="h3-tombstone-delete.html">
+      <div class="step">STEP H3 · done</div>
+      <h3>墓碑 + delete() + 归并比较器重写</h3>
+      <p><code>delete(k)</code> 写 <code>TYPE_DELETION</code> 墓碑;get 见墓碑返回 None;<code>MergeIterator</code> 去重从"全 key 相等"改成"<strong>user_key 相等</strong>",墓碑遮蔽旧值且自己不吐。<code>get(k) ≡ scan(k..=k).first()</code> 互锁两路径。</p>
+      <div class="meta">harness:墓碑可见性 · get≡scan首元素 · 删后重写复活</div>
+    </a>
+  </div>
+
+  <div class="ask"><strong>承接 Phase J/K.</strong> H3 的读路径用一个固定的"最大 seq"读最新。<strong>Phase J</strong> 把它<strong>参数化</strong>成可传入的 <code>snapshot_seq</code> → 读历史快照(时间旅行)。<strong>Phase K</strong> 把 G2 的 minimal scan 升级成快照+墓碑感知的对外范围游标。本阶段所有钥匙都是 H1 的 <code>lookup_key(uk, snap)</code>:H3 传 MAX、J 传历史 seq。</div>
+
+  <h2>本阶段交付的不变量</h2>
+  <table>
+    <thead><tr><th>不变量</th><th>怎么验</th><th>步</th></tr></thead>
+    <tbody>
+      <tr><td><strong>编码字节可比</strong></td><td>裸 sort = user_key 升 / seq 降;lookup_key lower_bound 落最新可见版本</td><td>H1</td></tr>
+      <tr><td><strong>seq 单调 + 写 round-trip</strong></td><td>put 分配递增 seq;WAL replay 重建带版本的 InternalKey,覆盖写读到最新</td><td>H2</td></tr>
+      <tr><td><strong>墓碑可见性</strong></td><td>delete 后 get 返回 None;之后重新 put 又能读到(复活);墓碑遮蔽 SST 旧值</td><td>H3</td></tr>
+      <tr><td><strong>两读路径互锁</strong></td><td><code>get(k)</code> == <code>scan(k..=k)</code> 首元素(含墓碑/覆盖)</td><td>H3</td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/dbformat.h">dbformat.h</a>(InternalKey/Comparator/ValueType)· <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl_write.cc">db_impl_write.cc</a>(seq 分配)。</p>
+    <p>从 <a href="h1-internalkey.html">H1 — InternalKey</a> 开始。</p>
+  </div>
+</div>
+</body>
+</html>

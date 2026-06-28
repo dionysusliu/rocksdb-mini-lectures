@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H3 · 墓碑 + delete() — 删除是一种写</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="h2-write-path-seq.html">← H2</a> &nbsp;·&nbsp; <a href="index.html">Phase H</a> &nbsp;·&nbsp; H3</div>
+
+  <div class="kicker">STEP H3 · Phase H 多版本</div>
+  <h1>墓碑 + delete() — 删除是一种写</h1>
+  <p>H2 把 seq 穿透了引擎,但所有写都是 <code>TYPE_VALUE</code>——还不能<strong>删</strong>。H3 引入 <code>TYPE_DELETION</code> <strong>墓碑</strong>:删一个 key,不是去存储里把它抹掉(它可能散在 memtable + 好几个 SST 里,逐个抹掉既慢又违反"只追加"),而是<strong>写一条墓碑</strong>——一个 type=Delete、更大 seq 的新版本。读到墓碑即"此 key 已删";归并时墓碑作为最新版本,遮蔽下层所有旧值。真正回收空间要等 compaction 把墓碑和被它遮的旧值一起丢掉(Tier 3)。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0"><code>Engine::delete(key)</code>:分配 seq、写 <code>encode(key, seq, TYPE_DELETION)</code> 墓碑(value 空)进 WAL + memtable。读路径在 H2 已留好口子(<code>get</code> 见 <code>type != VALUE</code> 返回 None、<code>scan</code> 跳过非 VALUE),H3 主要是加 <code>delete</code> 并验证语义。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 删后 get=None / scan 不见;删后重新 put 又复活;memtable 墓碑遮蔽已 flush 的 SST 旧值(跨 flush 仍 None);<code>get(k) ≡ scan(k, succ(k)).first()</code> 在 put/delete/flush 随机流下恒成立。</p>
+  </div>
+
+  <h3>删除为什么是"写一条墓碑",而不是"抹掉"</h3>
+  <p>LSM 的铁律是<strong>只追加、不原地改</strong>。一个 key 的历史版本可能散在 active memtable、好几个 immutable、一摞不同层的 SST 里。要"抹掉"它,得把每一处都找出来删——既要随机写(违反顺序写)、又要改不可变的 SST(违反只读)。所以 LSM 把删除也变成一次<strong>顺序追加</strong>:</p>
+  <table>
+    <thead><tr><th></th><th>写一个值</th><th>删一个 key</th></tr></thead>
+    <tbody>
+      <tr><td>动作</td><td>put → <code>encode(k, seq, VALUE)</code> + value</td><td>delete → <code>encode(k, seq, DELETION)</code> + 空</td></tr>
+      <tr><td>本质</td><td>追加一个新版本</td><td><strong>追加一个新版本</strong>(只是 type 不同)</td></tr>
+      <tr><td>读到它</td><td>返回 value</td><td>返回 None(此 key 已删)</td></tr>
+      <tr><td>对旧值</td><td>遮蔽(seq 更大)</td><td>遮蔽(seq 更大)</td></tr>
+    </tbody>
+  </table>
+  <p>墓碑和普通写<strong>走完全一样的路径</strong>:同样分配 seq、同样进 memtable / WAL / SST、同样靠"seq 大者最新"在归并里胜出。唯一区别是读到它时,<code>type==DELETION</code> 让结果变成 None 而非 value。<strong>删除被统一进了"写 + 多版本"框架</strong>——这就是 H1/H2 把 type 编进 key 的回报。</p>
+
+  <div class="warnbox"><strong>墓碑会"复活"被删的 key 吗?——不会,只要 seq 单调。</strong> <code>put k=v1</code>(seq 1)→ <code>delete k</code>(seq 2,墓碑)→ <code>put k=v2</code>(seq 3)。三个版本按 seq 降序:v2@3, 墓碑@2, v1@1。读最新 = v2@3 → 复活成 v2。删除不是终态,只是"此刻最新版本恰好是墓碑"。这正是 <code>delete_hides_then_reput_revives</code> 验的。<strong>反过来:墓碑必须有比被删值更大的 seq,否则删不掉</strong>——又一次 seq 单调的重要性。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li><code>Engine::delete(key)</code>:分配 seq、<code>encode(.., TYPE_DELETION)</code>、WAL + memtable 写空 value(「代码 1」)。</li>
+    <li>确认读路径已就位:<code>get</code> 的 <code>(t == TYPE_VALUE).then_some(v)</code>、<code>scan</code> 的 <code>value_type == TYPE_VALUE</code> 过滤(H2 已写)。</li>
+    <li>敲入「代码 2」三组 harness(藏/复活 · 遮蔽 SST · get≡scan首元素),<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>Engine::delete</code>(engine.rs)</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">delete</span>(&<span class="k">mut</span> self, key: Key) -> Result&lt;()&gt; {
+        <span class="k">let</span> s = self.seq; self.seq += 1;
+        <span class="k">let</span> ik = internal_key::<span class="f">encode</span>(&key, s, internal_key::TYPE_DELETION);
+        self.wal.<span class="f">append</span>(&ik, &Bytes::<span class="f">new</span>())?;      <span class="c">// 墓碑 value 空</span>
+        self.wal.<span class="f">sync</span>()?;
+        self.mem.<span class="f">put</span>(ik, Bytes::<span class="f">new</span>());
+        <span class="k">if</span> self.mem.<span class="f">is_full</span>(self.flush_threshold) { self.<span class="f">flush</span>()?; }
+        Ok(())
+    }
+
+    <span class="c">// 读路径(H2 已写,无需改):墓碑自然变 None / 被 scan 跳过</span>
+    <span class="c">// get:  if let Some((t, v)) = src.get_newest(k, snap) { return (t == TYPE_VALUE).then_some(v); }</span>
+    <span class="c">// scan: if internal_key::value_type(it.key()) == TYPE_VALUE { out.push(...) }</span></pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>delete</code> 和 <code>put</code> 几乎逐行一样——只差 type 和空 value。这正是"删除是一种写"在代码上的体现。<strong>读路径一行不用改</strong>:H2 写 <code>get_newest</code> 返回 <code>(type, value)</code> 时就预留了 type 分支,<code>get</code> 的 <code>(t == TYPE_VALUE).then_some(v)</code> 对墓碑天然给 None。<strong>好的抽象让后续语义"免费"加上</strong>——这是 H1 把 type 编进 key、H2 让读路径携带 type 的复利。</p>
+
+  <h2>🧰 Coding style:删除即写 · 读路径预留 type 分支 · 互锁双路径</h2>
+  <ul>
+    <li><strong>删除收敛进"写 + 多版本"</strong>:不为删除造一套新机制,而是复用整条写路径,只换一个 type。<strong>能用已有框架的一个新枚举值表达的语义,就别造新机制</strong>——更少代码、更少 bug、更易推理(墓碑和值同样参与 seq 定序、归并、compaction)。</li>
+    <li><strong>读路径早留扩展点</strong>:H2 让 <code>get_newest</code> 返回 <code>(type, value)</code> 而非裸 value,当时还没有删除,但留了 type。H3 直接受益——加 <code>delete</code> 即可,读路径零改。<strong>在抽象边界多带一点元信息(type),给未来语义留口子</strong>。</li>
+    <li><strong>双路径互锁当回归网</strong>:<code>get(k) ≡ scan(k, succ(k)).first()</code> 把点查和范围读绑成"必须给同一答案"。任一条路径处理墓碑/覆盖出错,这条 fuzz 差分立刻红。<strong>两个本应一致的实现互为 oracle</strong>,比各写各的断言更狠。</li>
+  </ul>
+
+  <h2>🧠 System mindset:逻辑删除 vs 物理删除</h2>
+  <p>H3 划清了一条重要的线:<strong>逻辑删除</strong>(墓碑标记"已删",读不可见)与<strong>物理删除</strong>(真正回收空间)。LSM 把它俩<strong>解耦到不同时间</strong>:</p>
+  <table>
+    <thead><tr><th></th><th>逻辑删除(H3)</th><th>物理删除(Tier 3 compaction)</th></tr></thead>
+    <tbody>
+      <tr><td>何时</td><td>delete 的瞬间</td><td>compaction 归并到底层时</td></tr>
+      <tr><td>做什么</td><td>写墓碑,读路径遮蔽</td><td>墓碑 + 被遮旧值一起丢弃,空间回收</td></tr>
+      <tr><td>代价</td><td>O(1) 一次写</td><td>后台批量,摊薄</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:"<strong>标记删除 + 延迟回收</strong>"是高写入系统的通用招式——避免删除时的随机 IO,把回收攒成批后台做。同构:文件系统的 unlink(先解链接、空间后回收)、GC 语言的标记-清除、Kafka 的 log compaction、SQL 的软删除(<code>deleted_at</code> 标记)。代价是<strong>墓碑会占空间、还可能拖慢读</strong>(读得跳过一堆墓碑)——所以才有 Tier 3 的墓碑 GC(底层 compaction 才能真正丢弃,因为只有到了最底层才能确定"下面没有更旧的值需要这个墓碑去遮")。<strong>H3 标记,Tier 3 回收</strong>,这条分工后面会反复出现。</p>
+
+  <h2>🧪 Harness 系统:藏/复活 · 跨层遮蔽 · 双路径互锁</h2>
+  <div class="harness">
+    <div class="kicker">三组各盯一类</div>
+    <p style="margin:.3em 0 0">① <strong>藏 + 复活</strong>:put→get 有值;delete→get None & scan 空;再 put→get 新值。验"墓碑遮蔽 + seq 让复活生效"。② <strong>跨层遮蔽</strong>:put→flush(值进 SST)→delete(墓碑在 memtable)→get None;再 flush(墓碑也进 SST)→仍 None。验"高层墓碑遮蔽低层 SST 旧值、且墓碑落盘后不失效"。③ <strong>双路径互锁</strong>:2000 步随机 put/delete/freeze/flush,每步抽查所有 key <code>get(k) == scan(k, succ(k)).first()</code>。<code>succ(k) = k ‖ 0x00</code> 是 k 的紧邻后继,<code>[k, succ)</code> 恰好只含 k。这条把"点查正确"和"范围读正确"绑成一个不可分割的不变量。</p>
+  </div>
+
+  <h3>代码 2 — harness(engine.rs tests)</h3>
+  <pre>    <span class="c">#[test]</span> <span class="c">// 藏 + 复活</span>
+    <span class="k">fn</span> <span class="f">delete_hides_then_reput_revives</span>() {
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v1"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();
+        e.<span class="f">delete</span>(<span class="s">"k"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"k"</span>), None);                    <span class="c">// 墓碑遮蔽</span>
+        <span class="f">assert!</span>(e.<span class="f">scan</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>).<span class="f">is_empty</span>());
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v2"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"k"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"v2"</span>[..]));  <span class="c">// 复活</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 高层墓碑遮蔽 SST 旧值</span>
+    <span class="k">fn</span> <span class="f">tombstone_shadows_sst_value</span>() {
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>(); e.<span class="f">flush</span>().<span class="f">unwrap</span>();  <span class="c">// v 落 SST</span>
+        e.<span class="f">delete</span>(<span class="s">"k"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();                       <span class="c">// 墓碑在 memtable</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"k"</span>), None);
+        e.<span class="f">flush</span>().<span class="f">unwrap</span>();                                  <span class="c">// 墓碑也落 SST</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"k"</span>), None);                          <span class="c">// 仍遮蔽</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// get ≡ scan 首元素(2000 步 put/delete/freeze/flush fuzz)</span>
+    <span class="k">fn</span> <span class="f">get_equiv_scan_first_element</span>() {
+        … 随机操作 …
+        <span class="k">for</span> p <span class="k">in</span> 0..30 {
+            <span class="k">let</span> k = format!(<span class="s">"k{p:02}"</span>);
+            <span class="k">let</span> <span class="k">mut</span> succ = k.<span class="f">clone</span>().<span class="f">into_bytes</span>(); succ.<span class="f">push</span>(0);  <span class="c">// [k, k‖0) 恰好只含 k</span>
+            <span class="k">let</span> from_scan = e.<span class="f">scan</span>(k.<span class="f">as_bytes</span>(), &succ).<span class="f">into_iter</span>().<span class="f">next</span>().<span class="f">map</span>(|(_, v)| v);
+            <span class="f">assert_eq!</span>(e.<span class="f">get</span>(k.<span class="f">as_bytes</span>()), from_scan);
+        }
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">H3 判定 — 全绿 · Phase H 收官</div><p style="margin:.3em 0 0"><code>delete_hides_then_reput_revives ... ok</code><br><code>tombstone_shadows_sst_value ... ok</code><br><code>get_equiv_scan_first_element ... ok</code><br><strong>44 passed; 0 failed</strong></p></div>
+
+  <div class="milestone">🏁 <strong>Phase H 达成:多版本语义齐了</strong>。seq(谁新)+ type(Put/Delete)+ 墓碑(删除)+ 两条读路径互锁。引擎现在<strong>能删、删得对、删了能复活</strong>,且点查与范围读对"最新版本"给出一致答案。但读的永远是"当下最新"——还不能读<strong>历史快照</strong>。<strong>Phase J</strong> 把读路径里写死的 <code>snap = Seq::MAX</code> 参数化成可传入的 <code>snapshot_seq</code>,就有了时间旅行。</p></div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">H3 / Phase H 收尾</div>
+    <ol>
+      <li><strong>墓碑能立刻从存储里删掉吗?</strong>(不能。墓碑要"遮蔽"散在下层的旧值,只要下层还可能有被删 key 的旧版本,墓碑就得留着挡。只有 compaction 把数据归并到<strong>最底层</strong>、确认下面再无更旧版本时,才能把墓碑和它遮的旧值一起丢——Tier 3 的墓碑 GC。<strong>过早删墓碑 = 旧值复活</strong>,是 LSM 经典 bug。)</li>
+      <li><strong>为什么读路径在 H2 就"免费"支持了墓碑?</strong>(因为 H2 把 <code>get_newest</code> 设计成返回 <code>(type, value)</code>、<code>get</code> 写成 <code>(t==VALUE).then_some(v)</code>。当时没有删除,但 type 分支留好了。H3 只加 <code>delete</code> 这个写入侧,读侧零改。<strong>抽象边界上多带一点元信息,后续语义就能低成本叠加</strong>——这就是为什么值得在 H1 就把 type 编进 key。)</li>
+      <li><strong><code>get(k) ≡ scan(k, succ)</code> 为什么是强约束?</strong>(get 和 scan 是<strong>两套独立实现</strong>(逐层命中即停 vs 归并去重),却必须对"k 的最新可见版本"给出<strong>同一答案</strong>。让它们互为 oracle,任一处理墓碑/覆盖/层序出错都会被另一条逮住。比"各自跟手写期望值比"更狠——因为手写期望也可能错,而两条独立实现同时错到一块儿的概率极低。)</li>
+      <li><strong>墓碑的 value 为什么是空?</strong>(墓碑只表达"此 key 在此 seq 被删",不携带数据。空 value 省空间。读到墓碑根本不看 value(直接 None)。RocksDB 的 <code>kTypeDeletion</code> 同样无 value(另有 <code>kTypeSingleDeletion</code>、范围墓碑 <code>kTypeRangeDeletion</code> 等变体,我们 MVP 只要最基本那种)。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase J — 快照(时间旅行).</strong> H3 的读路径处处用 <code>snap = Seq::MAX</code> 读最新。Phase J 把它<strong>参数化</strong>:<code>get_as_of(k, snapshot_seq)</code> / <code>scan_as_of(.., snapshot_seq)</code> 只看 <code>seq ≤ snapshot</code> 的版本,无视之后的写——读到"过去某一刻的一致视图"。钥匙还是 H1 的 <code>lookup_key(uk, snap)</code>,只是 snap 不再恒为 MAX。MVCC 的核心就此落地。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/dbformat.h">dbformat.h</a>(ValueType / kTypeDeletion)· <a href="https://github.com/facebook/rocksdb/blob/main/db/snapshot_impl.h">snapshot_impl.h</a>(下一站 J 的快照)。</p>
+    <p>想完跟我对答案,或说"继续 Phase J"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

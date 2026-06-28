@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B2 · Reader + 写路径 + 崩溃恢复</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="b1-wal-record-format.html">← B1</a> &nbsp;·&nbsp; <a href="index.html">Phase B</a> &nbsp;·&nbsp; B2 &nbsp;·&nbsp; <span style="color:#bbb">Phase B 完</span></div>
+
+  <div class="kicker">STEP B2 · Phase B WAL</div>
+  <h1>Reader + 写路径 + 崩溃恢复</h1>
+  <p>把字节读回来变成操作、容忍被撕裂的尾巴，再用一个 <code>Engine</code> 把 WAL 和 MemTable 接成一条写路径，<code>open</code> 时重放恢复。这一步引擎第一次<strong>活过重启</strong>。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>Wal::replay</code>（解码 + 残尾容忍）与 <code>src/engine.rs</code> 的 <code>Engine{open,put,get}</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 崩溃恢复 harness——写入、drop（模拟崩溃）、重开，所有 ack 的写都在；截断尾后重开不 panic、恢复完整前缀。</p>
+  </div>
+
+  <h3>写路径的铁律（mission 锚）</h3>
+  <p>RocksDB 恢复逻辑 <code>DBImpl::RecoverLogFiles</code> 干的就是：开 log reader，一条条 <code>ReadRecord</code>，<code>InsertInto</code> memtable。你这一步是它的极简版。但<strong>顺序铁律</strong>一致：<code>put</code> 里 WAL 先 append+sync、MemTable 后插。崩在中间——若 WAL 已落但 MemTable 没插，重放补上；若反过来先插 MemTable，崩溃后那次写既没进 WAL 又随内存蒸发 → ack 了却丢了，违反持久性。</p>
+  <span class="src">对标 db/log_reader.cc:75 ReadRecord · db_impl_open.cc:1180 RecoverLogFiles · :1636 InsertInto</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>给 <code>src/wal.rs</code> 补上「代码 1」的 <code>replay</code> + <code>decode_payload</code>。</li>
+    <li>新建 <code>src/engine.rs</code>，敲入「代码 2」。</li>
+    <li><code>src/lib.rs</code> 加 <code>pub mod engine;</code>。确认 <code>tempfile</code> 在 <code>[dev-dependencies]</code>。</li>
+    <li>敲入「代码 3」崩溃恢复 harness，跑命令看绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>wal.rs</code> 读端（补在写端之后）</h3>
+  <pre><span class="k">use</span> std::io::Read;       <span class="c">// 加到文件顶部 use 区</span>
+<span class="k">use</span> anyhow::bail;
+<span class="k">use</span> bytes::Bytes;
+
+<span class="k">impl</span> <span class="t">Wal</span> {
+    <span class="c">/// 重放所有完好 record。遇到第一条残缺/损坏的尾就干净停下。</span>
+    <span class="c">/// 返回 (key,value) 序列，按写入顺序——覆盖写靠重放顺序自然生效。</span>
+    <span class="k">pub fn</span> <span class="f">replay</span>(path: &Path) -> Result&lt;Vec&lt;(Bytes, Bytes)&gt;&gt; {
+        <span class="k">let</span> <span class="k">mut</span> buf = Vec::<span class="f">new</span>();
+        <span class="k">match</span> File::<span class="f">open</span>(path) {
+            Ok(<span class="k">mut</span> f) => { f.<span class="f">read_to_end</span>(&<span class="k">mut</span> buf)?; }
+            Err(e) <span class="k">if</span> e.<span class="f">kind</span>() == std::io::ErrorKind::NotFound => <span class="k">return</span> Ok(<span class="f">vec!</span>[]),
+            Err(e) => <span class="k">return</span> Err(e.<span class="f">into</span>()),
+        }
+        <span class="k">let</span> <span class="k">mut</span> out = Vec::<span class="f">new</span>();
+        <span class="k">let</span> <span class="k">mut</span> pos = 0;
+        <span class="c">// 帧头 8 字节(crc4+len4)读不全 → 到尾了</span>
+        <span class="k">while</span> pos + 8 &lt;= buf.<span class="f">len</span>() {
+            <span class="k">let</span> crc = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(buf[pos..pos+4].<span class="f">try_into</span>().<span class="f">unwrap</span>());
+            <span class="k">let</span> len = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(buf[pos+4..pos+8].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> <span class="t">usize</span>;
+            <span class="k">let</span> start = pos + 8;
+            <span class="k">if</span> start + len &gt; buf.<span class="f">len</span>() { <span class="k">break</span>; }      <span class="c">// 残尾：payload 没写全</span>
+            <span class="k">let</span> payload = &buf[start..start+len];
+            <span class="k">if</span> crc32fast::<span class="f">hash</span>(payload) != crc { <span class="k">break</span>; } <span class="c">// 损坏：crc 不符（B1 的故障注入靠这行）</span>
+            <span class="k">let</span> (k, v) = <span class="f">decode_payload</span>(payload)?;
+            out.<span class="f">push</span>((k, v));
+            pos = start + len;
+        }
+        Ok(out)
+    }
+}
+
+<span class="k">fn</span> <span class="f">decode_payload</span>(p: &[<span class="t">u8</span>]) -> Result&lt;(Bytes, Bytes)&gt; {
+    <span class="k">let</span> <span class="k">mut</span> i = 0;
+    <span class="k">if</span> p.<span class="f">is_empty</span>() || p[i] != TAG_PUT { <span class="f">bail!</span>(<span class="s">"bad tag"</span>); }
+    i += 1;
+    <span class="k">let</span> klen = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(p[i..i+4].<span class="f">try_into</span>()?) <span class="k">as</span> <span class="t">usize</span>; i += 4;
+    <span class="k">let</span> key = Bytes::<span class="f">copy_from_slice</span>(&p[i..i+klen]); i += klen;
+    <span class="k">let</span> vlen = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(p[i..i+4].<span class="f">try_into</span>()?) <span class="k">as</span> <span class="t">usize</span>; i += 4;
+    <span class="k">let</span> val = Bytes::<span class="f">copy_from_slice</span>(&p[i..i+vlen]);
+    Ok((key, val))
+}</pre>
+
+  <h3>代码 2 — <code>src/engine.rs</code>（写路径接线）</h3>
+  <pre><span class="c">// src/engine.rs — 把 WAL + MemTable 接成一条带持久化的写路径。对标 DBImpl 的极简版。</span>
+<span class="k">use</span> std::path::Path;
+<span class="k">use</span> anyhow::Result;
+<span class="k">use</span> crate::kv::{Key, Value};
+<span class="k">use</span> crate::memtable::MemTable;
+<span class="k">use</span> crate::wal::Wal;
+
+<span class="k">pub struct</span> <span class="t">Engine</span> {
+    mem: MemTable,
+    wal: Wal,
+}
+
+<span class="k">impl</span> <span class="t">Engine</span> {
+    <span class="c">/// 打开 / 创建一个引擎目录。先重放已有 WAL 重建 MemTable，再开 WAL 续写。</span>
+    <span class="k">pub fn</span> <span class="f">open</span>(dir: &Path) -> Result&lt;Self&gt; {
+        std::fs::<span class="f">create_dir_all</span>(dir)?;
+        <span class="k">let</span> wal_path = dir.<span class="f">join</span>(<span class="s">"wal.log"</span>);
+        <span class="k">let</span> mem = MemTable::<span class="f">new</span>();
+        <span class="c">// —— 恢复：重放顺序 = 写入顺序，后写的覆盖先写的 ——</span>
+        <span class="k">for</span> (k, v) <span class="k">in</span> Wal::<span class="f">replay</span>(&wal_path)? {
+            mem.<span class="f">put</span>(k, v);
+        }
+        <span class="k">let</span> wal = Wal::<span class="f">open_append</span>(&wal_path)?;
+        Ok(Self { mem, wal })
+    }
+
+    <span class="c">/// 写路径铁律：① WAL 落盘 → ② fsync → ③ 才让读可见。顺序不可换（B1 核心问题1）。</span>
+    <span class="c">/// &mut self：WAL 是串行点，写入在此被序列化——正是 group commit 要优化的那个串行瓶颈。</span>
+    <span class="k">pub fn</span> <span class="f">put</span>(&<span class="k">mut</span> self, key: Key, value: Value) -> Result&lt;()&gt; {
+        self.wal.<span class="f">append</span>(&key, &value)?; <span class="c">// 1. 先写日志</span>
+        self.wal.<span class="f">sync</span>()?;             <span class="c">// 2. 强制落盘（MVP: 每次 put 都 sync）</span>
+        self.mem.<span class="f">put</span>(key, value);     <span class="c">// 3. 现在才对 get 可见</span>
+        Ok(())
+    }
+
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[<span class="t">u8</span>]) -> Option&lt;Value&gt; {
+        self.mem.<span class="f">get</span>(key) <span class="c">// Phase B 只有 MemTable 一层；Phase C/D 会加 SST 查找链</span>
+    }
+}</pre>
+
+  <div class="warnbox"><strong>注意 <code>&amp;mut self</code>.</strong> Phase A 的 <code>MemTable::put</code> 是 <code>&amp;self</code>（可并发）。但 <code>Engine::put</code> 退回 <code>&amp;mut self</code>——因为 WAL 是个有序追加点，必须串行。这正是你研究 backlog 里那个并发写课题的现场：WAL 把并发又收回成串行,RocksDB 用 group commit 把"N 次 fsync 压成 1 次"来救它。Phase B 先串行跑对，并发优化是后话。</div>
+
+  <h2>Harness 系统 ⑤：崩溃恢复</h2>
+  <div class="harness">
+    <div class="kicker">为什么这里用崩溃恢复</div>
+    <p style="margin:.3em 0 0">持久性的唯一证明方式：<strong>真的"死"一次再活过来看数据在不在</strong>。
+    模拟崩溃不需要真 kill 进程——<code>drop(engine)</code> 关掉文件、不做任何额外清理，就等价于"进程在这一刻消失"。然后用同一个目录 <code>open</code> 第二个 <code>Engine</code>，断言所有 ack 的写都读得到。
+    再加一招 torn-write：把 WAL 尾截掉几字节，模拟"写到一半断电"，验证恢复出完整前缀且不 panic。这是 RocksDB <code>db_stress --reopen</code> 的核心。</p>
+  </div>
+
+  <h3>代码 3 — 崩溃恢复 harness（接 <code>engine.rs</code> 末尾）</h3>
+  <pre><span class="c">#[cfg(test)]</span>
+<span class="k">mod</span> tests {
+    <span class="k">use</span> super::*;
+    <span class="k">use</span> bytes::Bytes;
+    <span class="k">use</span> tempfile::tempdir;
+
+    <span class="c">// 崩溃恢复：写 → drop(模拟崩) → 重开 → 数据全在（含覆盖写）</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">survives_reopen</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        {
+            <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+            e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"a"</span>), Bytes::<span class="f">from</span>(<span class="s">"1"</span>)).<span class="f">unwrap</span>();
+            e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"b"</span>), Bytes::<span class="f">from</span>(<span class="s">"2"</span>)).<span class="f">unwrap</span>();
+            e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"a"</span>), Bytes::<span class="f">from</span>(<span class="s">"3"</span>)).<span class="f">unwrap</span>(); <span class="c">// 覆盖 a</span>
+            <span class="c">// e 在此 drop = 模拟进程崩溃（文件关闭，无额外动作）</span>
+        }
+        <span class="k">let</span> e2 = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"a"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"3"</span>[..])); <span class="c">// 重放顺序保证读到最新</span>
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"b"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"2"</span>[..]));
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"missing"</span>), None);
+    }
+
+    <span class="c">// torn write：截断 WAL 尾 → 恢复出前缀、丢残尾、不 panic</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">truncated_tail_tolerated</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        {
+            <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+            e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"k1"</span>), Bytes::<span class="f">from</span>(<span class="s">"v1"</span>)).<span class="f">unwrap</span>();
+            e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"k2"</span>), Bytes::<span class="f">from</span>(<span class="s">"v2"</span>)).<span class="f">unwrap</span>();
+        }
+        <span class="c">// 砍掉文件尾 3 字节，撕裂第二条 record</span>
+        <span class="k">let</span> wal = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"wal.log"</span>);
+        <span class="k">let</span> len = std::fs::<span class="f">metadata</span>(&wal).<span class="f">unwrap</span>().<span class="f">len</span>();
+        <span class="k">let</span> f = std::fs::OpenOptions::<span class="f">new</span>().<span class="f">write</span>(<span class="k">true</span>).<span class="f">open</span>(&wal).<span class="f">unwrap</span>();
+        f.<span class="f">set_len</span>(len - 3).<span class="f">unwrap</span>();
+        <span class="c">// 恢复：k1 完好读回，k2 残缺被丢，不崩</span>
+        <span class="k">let</span> e2 = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"k1"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"v1"</span>[..]));
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"k2"</span>), None);
+    }
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">Phase B 完成判定 — 全绿</div><p style="margin:.3em 0 0"><code>wal::tests::corruption_caught_at_tail ... ok</code><br><code>engine::tests::survives_reopen ... ok</code><br><code>engine::tests::truncated_tail_tolerated ... ok</code></p></div>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">Phase B 收尾</div>
+    <ol>
+      <li><strong>损坏在中间，不在尾</strong>：我们的 <code>replay</code> 遇到第一条坏 record 就 <code>break</code>——若坏的是<strong>中间</strong>那条，它后面所有完好 record 也被丢了。RocksDB 为什么能"跳过坏块、重同步到下一条"继续读？（提示：32KB block 边界 + record 分片，正是 B1 我们砍掉的东西。这就是分块的真正用途。）</li>
+      <li><strong>这个 harness 证明了什么、没证明什么</strong>：<code>drop+reopen</code> 模拟的是<strong>进程崩溃</strong>（OS page cache 还在）。它<strong>没有</strong>证明<strong>断电</strong>下的持久性（page cache 没 fsync 会随电源消失）。要真验断电,harness 该怎么改?（提示:在 <code>sync</code> 前后的不同时机崩；或注入"fsync 不生效"的假文件系统。诚实标注 harness 的边界——这是 storage-benchmark-lab 纪律。）</li>
+      <li><strong>WAL 会无限涨</strong>：每次 put 都 append，文件只增不减。什么时候能安全删/截断 WAL？（提示：当 MemTable 被 flush 成 SST 持久化后，那部分 WAL 就没用了——这是 Phase C flush 完成后的事，对标 RocksDB 的 WAL number 与 MANIFEST。）</li>
+      <li><strong>每次 put 都 fsync 的代价</strong>：fsync 是几毫秒级的慢操作。1 万次 put = 1 万次 fsync。learning-record 0006 的 group commit 怎么把它压成"一组一次 fsync"？你的 <code>Engine::put</code> 现在是反面教材——这正是后续可优化点，先跑对再说。</li>
+    </ol>
+  </div>
+
+  <h2>Phase B 完成</h2>
+  <div class="done">
+    <p style="margin:.2em 0"><code>cargo test</code> 全绿。你新得两种 harness：<strong>故障注入</strong>（B1）、<strong>崩溃恢复</strong>（B2）。</p>
+    <p style="margin:.2em 0">你的引擎现在<strong>断电不丢</strong>：<code>put</code> 落 WAL、<code>open</code> 重放恢复、残尾不致命。从"内存 HashMap"跨进了"存储引擎"。</p>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/log_reader.cc">log_reader.cc</a> 看 <code>ReadRecord:75</code> 的 resync/损坏处理 ·
+       <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl_open.cc">db_impl_open.cc</a> 读 <code>RecoverLogFiles:1180</code>。</p>
+    <p><strong>下一步：Phase C — SST.</strong> WAL 让数据持久,但它是<strong>无序追加</strong>的,查一个 key 得重放全部。Phase C 把冻结的 MemTable 倒成<strong>有序的 SST 文件</strong>(还记得 A3 的"满"信号吗?它就是 flush 触发器),从此能二分查找、能合并。先把上面 4 个核心问题想透,尤其 #2(harness 边界)和 #4(fsync 代价)。</p>
+    <p>想完跟我对答案,或说"开 Phase C"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

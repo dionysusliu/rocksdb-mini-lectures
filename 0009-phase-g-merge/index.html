@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase G · 读时归并(MergeIterator + scan)</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .cards{display:flex;flex-direction:column;gap:12px;margin:1.4em 0}
+  .card{display:block;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;border-radius:4px;text-decoration:none;color:inherit;background:#fff}
+  .card:hover{border-left-color:var(--accent2);background:#fafdff}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+  .card h3{margin:.2em 0 .3em;font-size:17px}
+  .card .meta{font-size:.84em;color:var(--soft);font-family:ui-monospace,monospace;margin-top:.4em}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0007-phase-f-iterator/index.html">Phase F</a> &nbsp;·&nbsp; Phase G</div>
+
+  <div class="kicker">TIER 2 · PHASE G</div>
+  <h1>读时归并 — MergeIterator + scan</h1>
+  <p>Phase F 把每种数据源都装成同一个 <code>LsmIterator</code>。Phase G <strong>组装</strong>它们:把 active memtable、若干 immutable、一摞 SST 这些<strong>各自有序</strong>的源,用一个 <code>MergeIterator</code> 归并成<strong>一条全局有序、新值遮旧值</strong>的流。这就是 LSM 的灵魂——<strong>读时归并(merge-on-read)</strong>:写时只追加,读时才把分层的有序片段合一。</p>
+
+  <p style="font-size:.92em;color:var(--soft)"><strong>本阶段只做<u>纯归并 + plain key</u>。</strong> 同 key 谁新谁旧,这一阶段<strong>只能</strong>靠<strong>源优先级</strong>(active &gt; immutable &gt; 新 SST &gt; 旧 SST)区分;比较器是裸字节 <code>Ord</code>、<strong>外置</strong>在 MergeIterator 里。到 <strong>Phase H3</strong>,seq 编进 key、比较器换成 <code>InternalKeyComparator</code>——届时只改"存的 key 字节 / merge 比较器 / 上层解码"三处,<code>MergeIterator</code> 的 next/堆逻辑<strong>一字不动</strong>。这次"比较器重写"是刻意的教学点(亲历 seq 如何改变去重语义)。快照与墓碑感知扫描留到 H/K。</p>
+
+  <h2>两个最小步</h2>
+  <div class="cards">
+    <a class="card" href="g1-merge-iterator.html">
+      <div class="step">STEP G1 · done</div>
+      <h3>MergeIterator:min-heap k 路归并</h3>
+      <p><code>merge.rs</code>:<code>MergeIterator&lt;'a&gt;</code> 持 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code> + min-heap <code>BinaryHeap&lt;Reverse&lt;(Vec&lt;u8&gt;, idx)&gt;&gt;</code>。看齐 N 源的头、取最小、只推那一个;同 key 多源按<strong>源优先级</strong>去重。第三次破自引用(堆存 key 副本而非借源)。对标 <code>merging_iterator.cc</code>。</p>
+      <div class="meta">harness:归并差分 vs 合并后 BTreeMap · 源优先级去重 · 跨源 seek</div>
+    </a>
+    <a class="card" href="g2-minimal-scan.html">
+      <div class="step">STEP G2 · done</div>
+      <h3>minimal scan(start..end):对外范围扫描雏形</h3>
+      <p>把引擎的 <code>mem</code> / <code>imm[..]</code> / <code>ssts[..]</code> 各做一个 <code>LsmIterator</code>,<strong>按优先级</strong>塞进 <code>MergeIterator</code>,<code>seek(start)</code> 起、吐到 <code>key &gt;= end</code> 止。这是引擎对外的第一个范围读 API(plain key)。对标 <code>db_iter.cc</code> 雏形。</p>
+      <div class="meta">harness:<code>engine.scan(a..b)</code> == <code>BTreeMap::range(a..b)</code>(引擎级差分)</div>
+    </a>
+  </div>
+
+  <div class="ask"><strong>承接 Phase H.</strong> G 在 plain key 上跑通后,Phase H 引入 <code>InternalKey = user_key + seq + type</code>:写读路径全穿、H3 把 <code>MergeIterator</code> 的比较器换成 <code>InternalKeyComparator</code>(同 user_key 按 seq 降序),去重从"源优先级"升级成"seq 定序",并把<strong>墓碑</strong>(<code>kTypeDeletion</code>)折入读路径。G' 的 minimal scan 到 <strong>Phase K</strong> 升级成快照 + 墓碑感知的完整对外 scan。</div>
+
+  <h2>本阶段交付的不变量</h2>
+  <table>
+    <thead><tr><th>不变量</th><th>怎么验</th><th>步</th></tr></thead>
+    <tbody>
+      <tr><td><strong>归并差分</strong></td><td>N 源 full scan == 按优先级合并进 <code>BTreeMap</code> 的有序遍历(<code>or_insert</code> 不覆盖 = 高优先级赢)</td><td>G1</td></tr>
+      <tr><td><strong>源优先级去重</strong></td><td>同 key 多源 → 只吐最高优先级源的值,且只一次(旧值被遮蔽、推进跳过)</td><td>G1</td></tr>
+      <tr><td><strong>跨源 seek</strong></td><td><code>seek(t)</code> 后落在所有源里第一个 ≥t 的 key(命中/缝隙/超界)</td><td>G1</td></tr>
+      <tr><td><strong>引擎级扫描差分</strong></td><td><code>engine.scan(a..b)</code> 逐条 == <code>BTreeMap::range(a..b)</code>(穿真实 mem+imm+SST)</td><td>G2</td></tr>
+    </tbody>
+  </table>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/merging_iterator.cc">merging_iterator.cc</a> · <a href="https://github.com/facebook/rocksdb/blob/main/db/db_iter.cc">db_iter.cc</a>。</p>
+    <p>从 <a href="g1-merge-iterator.html">G1 — MergeIterator</a> 开始。</p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Lab 09 · TTL CompactionFilter — 你亲手实现过期删除</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d8d3c4;--accent:#7a2e1d;--accent2:#2d5a4a;--faint:#6b6457;--code-bg:#f3f0e7;--hl:#fff6d5}
+  *{box-sizing:border-box}html{font-size:17px}
+  body{margin:0;background:var(--paper);color:var(--ink);line-height:1.65;-webkit-font-smoothing:antialiased;
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Songti SC","Source Han Serif SC",serif}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 28px 120px}
+  .kicker{font-size:.72rem;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);font-family:ui-monospace,Menlo,monospace;margin-bottom:14px}
+  h1{font-size:1.9rem;line-height:1.18;margin:0 0 8px;font-weight:600;letter-spacing:-.01em}
+  .sub{color:var(--faint);font-size:1.05rem;font-style:italic;margin-bottom:34px}
+  h2{font-size:1.3rem;margin:48px 0 12px;font-weight:600;border-bottom:2px solid var(--rule);padding-bottom:7px}
+  h3{font-size:1.02rem;margin:26px 0 7px;font-weight:600;color:var(--accent2)}
+  p{margin:12px 0}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.83em;background:var(--code-bg);padding:1.5px 5px;border-radius:3px}
+  pre{background:#1e1b16;color:#e8e2d4;border-left:3px solid var(--accent2);padding:14px 16px;overflow-x:auto;font-size:.78rem;line-height:1.55;border-radius:0 5px 5px 0;font-family:ui-monospace,Menlo,monospace;white-space:pre}
+  pre .c{color:#8a826f}pre .g{color:#9ec48a}pre .hl{color:#f3d77a}
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid rgba(122,46,29,.3)}
+  .src{font-family:ui-monospace,Menlo,monospace;font-size:.74rem;color:var(--accent2);background:#eef2ee;padding:1px 6px;border-radius:3px}
+  .step{display:grid;grid-template-columns:34px 1fr;gap:14px;margin:18px 0;align-items:start}
+  .step .n{width:34px;height:34px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-family:ui-monospace,monospace;font-weight:600;font-size:.95rem}
+  .step h3{margin:3px 0 4px}
+  .done{background:#2d5a4a;color:#eef6f1;border-radius:8px;padding:16px 20px;margin:24px 0;font-size:.95rem}
+  .done b{color:#fff}.done code{background:rgba(255,255,255,.15);color:#fff}
+  .hint{background:var(--hl);border:1px solid #e8d97a;border-radius:6px;padding:12px 16px;margin:14px 0;font-size:.9rem}
+  .hint b{color:var(--accent)}
+  .ask{background:var(--accent);color:#fff;border-radius:8px;padding:16px 20px;margin:36px 0 0;font-size:.95rem}
+  .ask b{color:#ffe}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:.85rem}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--rule)}
+  th{color:var(--accent2);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">Lab 09 · 阶段 3 改源码 · solve-type</div>
+  <h1>TTL CompactionFilter：你亲手实现过期删除</h1>
+  <div class="sub">脚手架已就位。你只写一件事——过滤器的删/留判断逻辑。跑出 [PASS] 即通关。</div>
+
+  <h2>Objective</h2>
+  <p>实现一个 TTL <code>CompactionFilter</code>：compaction 时自动删除过期的 key。这是 mission"修改源码实现新功能"里<b>最常用的真实生产功能</b>（Kvrocks/Pika 的 key 过期、Flink 状态清理都靠它），且是公开 API、不用改 RocksDB 源码。</p>
+
+  <h2>Prereqs</h2>
+  <p>已有 <span class="src">lab/</span> 工作区 + 已编译的 <code>librocksdb.dylib</code>（前 8 个 lab 用的那个）。脚手架文件 <span class="src">lab/src/09_compaction_filter.cc</span> 已生成并注册进 CMake。</p>
+
+  <h2>背景：value 编码（脚手架已写好）</h2>
+  <p>每个 value 前 8 字节存写入时间戳（unix 秒，小端），后面是 payload：</p>
+  <pre>value = [8字节 write_time][payload]
+         └ EncodeValue() 写入   └ DecodeWriteTime() 读出  (都已写好,直接调用)</pre>
+  <p>脚手架的 <code>main()</code> 会：写 1000 个 key（偶数 key 写入时间 = now-500 秒 <b>过期</b>，奇数 key = now-10 秒 <b>新鲜</b>）→ flush + <code>CompactRange</code> 触发 filter → 验证过期 key 被删、新鲜 key 保留 → 打印 PASS/FAIL。</p>
+
+  <h2>Steps — 你要填的 3 个 TODO</h2>
+
+  <div class="step"><div class="n">1</div><div>
+    <h3>TODO 1 — 实现 <code>FilterV2</code></h3>
+    <p>在 <code>TTLFilter</code> 类里加这个方法。这是核心：每个 compaction 流过的 key 都会回调它，你返回 <code>Decision</code> 决定留还是删。</p>
+    <pre>Decision FilterV2(int level, const Slice& key, ValueType value_type,
+                  const Slice& existing_value, std::string* new_value,
+                  std::string* skip_until) const override {
+  (void)level; (void)key; (void)new_value; (void)skip_until;  <span class="c">// 消未用警告</span>
+  <span class="hl">if (value_type != ValueType::kValue) return Decision::kKeep;</span>  <span class="c">// 只管普通值</span>
+  uint64_t write_time = DecodeWriteTime(existing_value);
+  <span class="hl">if (now_ - write_time > ttl_seconds_) return Decision::kRemove;</span>  <span class="c">// 过期→删</span>
+  return Decision::kKeep;
+}</pre>
+    <div class="hint"><b>为什么先判 value_type：</b> merge operand / wide-column 的 value 不是你的编码格式，盲解时间戳会读到垃圾。只处理 <code>kValue</code> 是正确性底线（回想讨论里的语义陷阱）。</div>
+  </div></div>
+
+  <div class="step"><div class="n">2</div><div>
+    <h3>TODO 2 — 实现 <code>Name()</code></h3>
+    <pre>const char* Name() const override { return "TTLFilter"; }</pre>
+    <p>RocksDB 要求每个 filter 有名字（日志/诊断用）。一行。</p>
+  </div></div>
+
+  <div class="step"><div class="n">3</div><div>
+    <h3>TODO 3 — 注册过滤器</h3>
+    <p>在 <code>main()</code> 里 <code>DB::Open</code> <b>之前</b>，把 filter 挂到 options：</p>
+    <pre>static TTLFilter filter(kNow, kTTL);
+options.compaction_filter = &amp;filter;</pre>
+    <div class="hint"><b>为什么 static：</b> filter 必须在整个 DB 生命周期内存活（compaction 是后台异步的）。栈变量会提前析构 → 悬垂指针。<code>static</code> 让它活到程序结束。生产中无状态 filter 用全局，有状态用 <code>compaction_filter_factory</code> 每次 compaction 建新实例。</div>
+  </div></div>
+
+  <h2>Run it（反馈回路）</h2>
+  <pre>cd lab/build
+cmake --build . --target 09_compaction_filter
+./09_compaction_filter</pre>
+  <p>填之前跑会是 <code>[FAIL]</code>（过期被删 0/500）。三个 TODO 填对后应翻成 <code>[PASS]</code>。</p>
+
+  <div class="done">
+    <b>✅ Done when：</b> <code>./09_compaction_filter</code> 打印 <code>[PASS] TTL CompactionFilter 工作正确!</code>（过期被删 500/500，新鲜保留 500/500，错误 0）。
+  </div>
+
+  <h2>Stretch（可选加码）</h2>
+  <table>
+    <tr><th>挑战</th><th>提示</th></tr>
+    <tr><td>用 <code>kChangeValue</code> 代替删除：过期 key 不删，把 payload 改成 "EXPIRED"</td><td>填 <code>*new_value</code> 然后 return <code>Decision::kChangeValue</code></td></tr>
+    <tr><td>统计本次 compaction 删了几个 key</td><td>filter 单例被并发调用,加 <code>std::atomic&lt;int&gt;</code> 计数；或改用 FilterFactory 每 compaction 独立计数</td></tr>
+    <tr><td>验证"不 compaction 就不删"</td><td>去掉 <code>CompactRange</code>,过期 key 仍能 Get 到 → 印证 filter 只在 compaction 触发</td></tr>
+  </table>
+
+  <h2>Teardown</h2>
+  <pre>rm -rf /tmp/rocksdb_lab_09   <span class="c"># 清理测试库</span></pre>
+
+  <p style="margin-top:30px"><b>📖 首选精读：</b> <a href="https://github.com/facebook/rocksdb/wiki/Compaction-Filter">RocksDB Wiki — Compaction Filter</a> + 本地接口 <span class="src">rocksdb-src/include/rocksdb/compaction_filter.h</span>（Decision 各值的语义注释）。</p>
+
+  <div class="ask">
+    <b>我是你的老师——卡住随时喊。</b> 填的时候编译报错看不懂、PASS 不了、想知道为什么 CompactRange 必须显式调用、或者想做 Stretch——直接把报错贴给我。填完我帮你 review 代码。
+  </div>
+
+</div>
+</body>
+</html>

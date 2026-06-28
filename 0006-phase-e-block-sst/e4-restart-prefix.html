@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E4 · restart points + 前缀键压缩</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .win{color:var(--good);font-weight:bold}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="e3-bench.html">← E3</a> &nbsp;·&nbsp; <a href="index.html">Phase E</a> &nbsp;·&nbsp; E4 &nbsp;·&nbsp; <a href="e5-block-trailer.html">E5 →</a></div>
+
+  <div class="kicker">STEP E4 · Phase E block-based SST</div>
+  <h1>restart points + 前缀键压缩</h1>
+  <p>E1 里我们留了一句"<code>restart_interval=1</code>,前缀压缩留作后续优化"。E3 的基准告诉我们:块化省了磁盘,但省的是<strong>索引</strong>,<strong>数据区</strong>还没动。E4 兑现这句承诺——块内每 <code>K</code> 条设一个 <strong>restart 点</strong>存完整 key,其余 entry 只存<strong>与前一条共享的前缀长度 + 后缀</strong>。排好序的 key 前缀高度相似(<code>0000…0001</code>、<code>0000…0002</code>),数据区<strong>第一次缩水</strong>;块内查找靠 restart 数组仍能二分。对标 RocksDB <code>block_builder.cc</code> 的 restart 机制——这是 RocksDB 块格式的<strong>签名招式</strong>。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">重写 <code>block.rs</code> 的 <code>BlockBuilder</code>/<code>Block</code>:entry 布局换成 <code>[shared][non_shared][vlen][key 后缀][val]</code>,块尾从 <code>offsets[]</code> 换成 <code>restarts[]</code>(只记 restart 点偏移)+ <code>num_restarts</code>。<code>add</code> 算前缀共享、每 <code>K</code> 条强制一个 restart;<code>get</code> 在 restarts 上二分定位段、段内线性扫并<strong>重建 key</strong>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 前缀重建差分(vs <code>BTreeMap</code>,强制多 restart 段)绿;restart 边界键(每段首/末、跨段)命中;<strong>引擎 + E2 既有 SST 测试全过</strong>(索引块改用 <code>restart_interval=1</code>,行为对 reader 透明);回 E3 重跑,<strong>磁盘那一栏继续下降</strong>。</p>
+  </div>
+
+  <h3>块布局:从 offsets 到 restarts(格式锚)</h3>
+  <svg viewBox="0 0 700 220" font-family="ui-monospace,monospace" font-size="11">
+    <text x="10" y="16" fill="#7a3b2e" font-size="12">E1/E2:每条存完整 key + offsets 每条一项</text>
+    <rect x="10" y="24" width="150" height="28" fill="#fcf3ee" stroke="#c98a6a"/><text x="85" y="42" text-anchor="middle" fill="#7a3b2e">klen|key|vlen|val</text>
+    <rect x="162" y="24" width="150" height="28" fill="#fcf3ee" stroke="#c98a6a"/><text x="237" y="42" text-anchor="middle" fill="#7a3b2e">klen|key|vlen|val</text>
+    <rect x="320" y="24" width="180" height="28" fill="#f4f1e8" stroke="#c9a25a"/><text x="410" y="42" text-anchor="middle" fill="#8a5a12">offsets[N] | count</text>
+
+    <text x="10" y="92" fill="#2e5d7a" font-size="12">E4:restart 点存完整 key,其余只存共享前缀长 + 后缀</text>
+    <rect x="10" y="100" width="180" height="28" fill="#e8f0e0" stroke="#7a9a5a" stroke-width="2"/><text x="100" y="118" text-anchor="middle" fill="#3a5a2a">⟲ shared=0 | 完整 key | val</text>
+    <rect x="192" y="100" width="150" height="28" fill="#eef3f6" stroke="#7fb0c9"/><text x="267" y="118" text-anchor="middle" fill="#2e5d7a">shared=14 | 后缀"2" | val</text>
+    <rect x="344" y="100" width="150" height="28" fill="#eef3f6" stroke="#7fb0c9"/><text x="419" y="118" text-anchor="middle" fill="#2e5d7a">shared=14 | 后缀"3" | val</text>
+    <rect x="496" y="100" width="190" height="28" fill="#f4f1e8" stroke="#c9a25a"/><text x="591" y="118" text-anchor="middle" fill="#8a5a12">restarts[R] | num_restarts</text>
+    <text x="10" y="150" fill="#888">restart 点(⟲):shared=0,存完整 key —— restarts 数组上能直接二分(完整 key 可比)。</text>
+    <text x="10" y="168" fill="#888">段内非 restart 条:只存与<tspan font-style="italic">前一条</tspan>的共享前缀长 + 后缀 —— 读时重建 key = 前一条[..shared] + 后缀。</text>
+    <text x="10" y="192" fill="#3a6b3a">数据区缩水来自这里:16B 的 key,段内多数只存 ~3–6B 后缀。</text>
+  </svg>
+  <p><strong>为什么要 restart 点、不直接全压?</strong> 若<strong>每</strong>条都只存"与前一条的差",那要定位第 i 条就得<strong>从块头一路重建</strong>到 i,块内查找退化成 O(条数) 线性。restart 点是<strong>压缩与可二分的折中</strong>:每 K 条放一个"锚"(完整 key),restarts 数组上二分锁定到某个 <code>K</code> 条的小段,段内才线性扫(最多重建 K 条)。<code>K</code> 就是 <strong>压缩率 ↔ 查找成本</strong>的旋钮:K 越大越省(完整 key 越少),但段内线性扫越长。RocksDB 默认 <code>K=16</code>。</p>
+  <span class="src">table/block_based/block_builder.cc:Add(前缀共享计算)· :Finish(append restarts[] + num_restarts)· block.cc:BlockIter::Seek(restarts 上二分 + 段内 ParseNextKey)</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>重写 <code>BlockBuilder</code>(「代码 1」):字段换成 <code>buf + restarts + last_key + counter + restart_interval</code>;<code>add</code> 算 <code>shared_prefix</code>、每 <code>K</code> 条记一个 restart。<code>finish</code> 缀 <code>restarts[] + num_restarts</code>。</li>
+    <li>重写 <code>Block</code>(「代码 2」):<code>decode</code> 改解 <code>restarts</code> + 算出 <code>entries_end</code>(末 4B 从 count 变 num_restarts);<code>get</code> 在 restarts 上二分定位段、段内线性扫<strong>重建 key</strong>;加 <code>for_each_entry</code>(单趟解全块,供索引解码)。</li>
+    <li>改 <code>sst.rs</code>(「代码 3」):索引块用 <code>BlockBuilder::with_restart_interval(1)</code>(每条都是 restart、无前缀压缩 → <code>len()==条数</code>);<code>open</code> 用 <code>for_each_entry</code> 解索引。<strong>data block 用默认 K=16,自动获得前缀压缩。</strong></li>
+    <li>敲入「代码 4」harness,<code>cargo test</code> 全绿;<code>cargo run --release --bin bench</code> 看磁盘续降。</li>
+  </ol>
+
+  <h3>代码 1 — <code>BlockBuilder</code>(前缀压缩 + restart)</h3>
+  <pre><span class="k">pub const</span> RESTART_INTERVAL: usize = 16;
+
+<span class="c">/// 两个 key 的公共前缀长度。</span>
+<span class="k">fn</span> <span class="f">shared_prefix</span>(a: &[u8], b: &[u8]) -> usize {
+    <span class="k">let</span> n = a.<span class="f">len</span>().<span class="f">min</span>(b.<span class="f">len</span>()); <span class="k">let</span> <span class="k">mut</span> i = 0;
+    <span class="k">while</span> i &lt; n && a[i] == b[i] { i += 1; } i
+}
+
+<span class="k">pub struct</span> <span class="t">BlockBuilder</span> {
+    buf: Vec&lt;u8&gt;, restarts: Vec&lt;u32&gt;, last_key: Vec&lt;u8&gt;,
+    counter: usize,            <span class="c">// 自上个 restart 起的条数</span>
+    restart_interval: usize,
+}
+<span class="k">impl</span> <span class="t">BlockBuilder</span> {
+    <span class="k">pub fn</span> <span class="f">new</span>() -> Self { Self::<span class="f">with_restart_interval</span>(RESTART_INTERVAL) }
+    <span class="k">pub fn</span> <span class="f">with_restart_interval</span>(k: usize) -> Self { <span class="c">/* k.max(1) */</span> }
+
+    <span class="k">pub fn</span> <span class="f">add</span>(&<span class="k">mut</span> self, key: &[u8], val: &[u8]) {
+        <span class="k">let</span> shared = <span class="k">if</span> self.counter == 0 {
+            self.restarts.<span class="f">push</span>(self.buf.<span class="f">len</span>() <span class="k">as</span> u32); <span class="c">// restart 点:存完整 key</span>
+            0
+        } <span class="k">else</span> { <span class="f">shared_prefix</span>(&self.last_key, key) };
+        <span class="k">let</span> non_shared = key.<span class="f">len</span>() - shared;
+        self.buf.<span class="f">extend_from_slice</span>(&(shared <span class="k">as</span> u32).<span class="f">to_le_bytes</span>());
+        self.buf.<span class="f">extend_from_slice</span>(&(non_shared <span class="k">as</span> u32).<span class="f">to_le_bytes</span>());
+        self.buf.<span class="f">extend_from_slice</span>(&(val.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>());
+        self.buf.<span class="f">extend_from_slice</span>(&key[shared..]); <span class="c">// 只存后缀</span>
+        self.buf.<span class="f">extend_from_slice</span>(val);
+        self.last_key.<span class="f">clear</span>(); self.last_key.<span class="f">extend_from_slice</span>(key);
+        self.counter += 1;
+        <span class="k">if</span> self.counter == self.restart_interval { self.counter = 0; } <span class="c">// 满 K 条 → 下条强制 restart</span>
+    }
+
+    <span class="k">pub fn</span> <span class="f">finish</span>(self) -> Bytes { <span class="c">/* buf + restarts[] + num_restarts */</span> }
+    <span class="k">pub fn</span> <span class="f">estimated_size</span>(&self) -> usize { self.buf.<span class="f">len</span>() + self.restarts.<span class="f">len</span>()*4 + 4 }
+    <span class="k">pub fn</span> <span class="f">is_empty</span>(&self) -> bool { self.restarts.<span class="f">is_empty</span>() }
+}</pre>
+
+  <h3>代码 2 — <code>Block</code>(restart 上二分 + 段内重建)</h3>
+  <pre><span class="k">pub struct</span> <span class="t">Block</span> { data: Bytes, restarts: Vec&lt;u32&gt;, entries_end: usize }
+
+<span class="k">impl</span> <span class="t">Block</span> {
+    <span class="c">/// decode 大改:末 4B 从 count(条数)变 num_restarts(restart 数);</span>
+    <span class="c">/// 倒数第二段从 offsets[N] 变 restarts[R];且必须算出 entries_end(restarts 数组起点)。</span>
+    <span class="k">pub fn</span> <span class="f">decode</span>(data: Bytes) -> Self {
+        <span class="k">let</span> n = data.<span class="f">len</span>();
+        <span class="k">let</span> num_restarts = u32::<span class="f">from_le_bytes</span>(data[n-4..n].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> usize;
+        <span class="k">let</span> entries_end = n - 4 - num_restarts * 4;   <span class="c">// entries 区结束 = restarts 数组起点</span>
+        <span class="k">let</span> <span class="k">mut</span> restarts = Vec::<span class="f">with_capacity</span>(num_restarts);
+        <span class="k">for</span> i <span class="k">in</span> 0..num_restarts {
+            <span class="k">let</span> p = entries_end + i * 4;
+            restarts.<span class="f">push</span>(u32::<span class="f">from_le_bytes</span>(data[p..p+4].<span class="f">try_into</span>().<span class="f">unwrap</span>()));
+        }
+        Self { data, restarts, entries_end }      <span class="c">// 不再存 offsets;存 restarts + entries_end</span>
+    }
+
+    <span class="c">/// 解析从 off 起一条:(shared, non_shared, 后缀, val, 下条 off)。</span>
+    <span class="k">fn</span> <span class="f">parse_at</span>(&self, off: usize) -> (usize, usize, &[u8], &[u8], usize) { <span class="c">/* 读 3×u32 + 后缀 + val */</span> }
+
+    <span class="c">/// restart 点的完整 key(shared==0,后缀即整 key)。</span>
+    <span class="k">fn</span> <span class="f">restart_key</span>(&self, ri: usize) -> &[u8] {
+        <span class="k">let</span> (_, _, suffix, _, _) = self.<span class="f">parse_at</span>(self.restarts[ri] <span class="k">as</span> usize); suffix
+    }
+
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;&[u8]&gt; {
+        <span class="k">if</span> self.restarts.<span class="f">is_empty</span>() { <span class="k">return</span> None; }
+        <span class="c">// ① restarts 上二分:找最后一个 restart_key &lt;= key 的段</span>
+        <span class="k">let</span> (<span class="k">mut</span> lo, <span class="k">mut</span> hi) = (0, self.restarts.<span class="f">len</span>());
+        <span class="k">while</span> lo &lt; hi {
+            <span class="k">let</span> mid = (lo + hi) / 2;
+            <span class="k">if</span> self.<span class="f">restart_key</span>(mid) &lt;= key { lo = mid + 1; } <span class="k">else</span> { hi = mid; }
+        }
+        <span class="k">if</span> lo == 0 { <span class="k">return</span> None; }          <span class="c">// 比第一个 restart 还小 → 不在本块</span>
+        <span class="k">let</span> seg = lo - 1;
+        <span class="k">let</span> start = self.restarts[seg] <span class="k">as</span> usize;
+        <span class="k">let</span> end = self.restarts.<span class="f">get</span>(seg+1).<span class="f">map</span>(|&r| r <span class="k">as</span> usize).<span class="f">unwrap_or</span>(self.entries_end);
+        <span class="c">// ② 段内线性扫,逐条重建 key(前缀来自上一条)</span>
+        <span class="k">let</span> <span class="k">mut</span> cur = Vec::new(); <span class="k">let</span> <span class="k">mut</span> off = start;
+        <span class="k">while</span> off &lt; end {
+            <span class="k">let</span> (shared, _ns, suffix, val, next) = self.<span class="f">parse_at</span>(off);
+            cur.<span class="f">truncate</span>(shared); cur.<span class="f">extend_from_slice</span>(suffix); <span class="c">// 重建 = 上一条[..shared] + 后缀</span>
+            <span class="k">match</span> cur.<span class="f">as_slice</span>().<span class="f">cmp</span>(key) {
+                Ordering::Equal   => <span class="k">return</span> Some(val),  <span class="c">// 命中:val 借入块缓冲(零拷贝)</span>
+                Ordering::Greater => <span class="k">return</span> None,       <span class="c">// 已越过,本段无此 key</span>
+                Ordering::Less    => {}
+            }
+            off = next;
+        }
+        None
+    }
+
+    <span class="c">/// 单趟解全块,回调 (key, val)。索引块解码用(O(n),不是 O(n²))。</span>
+    <span class="k">pub fn</span> <span class="f">for_each_entry</span>(&self, <span class="k">mut</span> f: <span class="k">impl</span> FnMut(&[u8], &[u8])) {
+        <span class="k">let</span> <span class="k">mut</span> cur = Vec::new(); <span class="k">let</span> <span class="k">mut</span> off = 0;
+        <span class="k">while</span> off &lt; self.entries_end {
+            <span class="k">let</span> (shared, _ns, suffix, val, next) = self.<span class="f">parse_at</span>(off);
+            cur.<span class="f">truncate</span>(shared); cur.<span class="f">extend_from_slice</span>(suffix);
+            <span class="f">f</span>(&cur, val); off = next;
+        }
+    }
+    <span class="k">pub fn</span> <span class="f">len</span>(&self) -> usize { self.restarts.<span class="f">len</span>() } <span class="c">// 注意:restart 数,非条数!</span>
+}</pre>
+  <div class="warnbox"><strong>陷阱:<code>len()</code> 现在是 restart 数,不是条数。</strong> E2 的索引解码 <code>for i in 0..index_block.len() { entry_at(i) }</code> 默认"len==条数"。前缀压缩后这<strong>不再成立</strong>(16 条才一个 restart)。两个修复缺一不可:① 索引块改用 <code>restart_interval=1</code>(每条都是 restart,<code>len()==条数</code> 重新成立、且 <code>entry_at</code> O(1));② 用 <code>for_each_entry</code> 单趟解码,避免"对每个 i 都从头扫"的 O(n²)。<strong>数据块</strong>用默认 K=16 吃满前缀压缩,<strong>索引块</strong>用 K=1 保持可随机解——同一个 <code>BlockBuilder</code>,两种 K,各取所需。</div>
+
+  <h3>代码 3 — <code>sst.rs</code> 两处改动</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">finish</span>(<span class="k">mut</span> self, path: &Path) -> Result&lt;()&gt; {
+        <span class="c">// …写 data blocks(默认 K=16,自动前缀压缩)…</span>
+        <span class="c">// 索引块用 restart_interval=1:每条都是 restart、无前缀压缩,</span>
+        <span class="c">// 读时 for_each_entry 一次 O(n) 解出全部 (末键 → handle)。</span>
+        <span class="k">let</span> <span class="k">mut</span> ib = BlockBuilder::<span class="f">with_restart_interval</span>(1);
+        <span class="c">// …for (k,h) in &self.index { ib.add(k, &h.encode()) }…</span>
+    }
+
+    <span class="k">fn</span> <span class="f">open_inner</span>(...) -> Result&lt;Self&gt; {
+        <span class="c">// …读 footer、读索引块…</span>
+        <span class="k">let</span> index_block = Block::<span class="f">decode</span>(Bytes::<span class="f">from</span>(ibuf));
+        <span class="k">let</span> <span class="k">mut</span> index = Vec::<span class="f">with_capacity</span>(index_block.<span class="f">len</span>());
+        index_block.<span class="f">for_each_entry</span>(|k, v| {
+            index.<span class="f">push</span>((Bytes::<span class="f">copy_from_slice</span>(k), BlockHandle::<span class="f">decode</span>(v)));
+        });
+        <span class="c">// data block 的 get 路径不变:read_block → Block::decode → block.get</span>
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo run --release --bin bench</div>
+
+  <h2>实测:数据区第一次缩水</h2>
+  <p>同一份 1M×116B 数据,只把 data block 的 <code>restart_interval</code> 从 1 改成 16(+前缀压缩),再跑 E3 的基准:</p>
+  <table>
+    <thead><tr><th>指标</th><th>E2(restart=1,无前缀压缩)</th><th>E4(restart=16,前缀压缩)</th><th>变化</th></tr></thead>
+    <tbody>
+      <tr><td>file size on disk</td><td>129.5 MB</td><td class="win">116.1 MB</td><td><strong>数据区 −13MB</strong>:每条 16B key 多数只存 ~3–6B 后缀</td></tr>
+      <tr><td>vs flat(152MB)</td><td>−15%</td><td class="win">−24%</td><td>索引瘦身 + 数据前缀压缩<strong>叠加</strong></td></tr>
+      <tr><td>index bytes in RAM</td><td>1.00 MB</td><td class="win">0.89 MB</td><td>块更密 → 块更少 → 稀疏索引更短</td></tr>
+      <tr><td>data blocks</td><td>31 250</td><td>27 778</td><td>同样 4KB 阈值下,每块装下更多条</td></tr>
+    </tbody>
+  </table>
+  <p><strong>这就是 E3 留的洞之一被补上的样子。</strong>磁盘赢面从"只省索引(−15%)"扩到"索引 + 数据前缀(−24%)"。注意它对<strong>排序键</strong>特别有效——key 越像(共同前缀越长),省得越多。随机散列 key 则几乎没有前缀可压(那要靠 E5 的通用压缩)。点查路径多了"段内重建 key"的开销,但每段最多 16 条,常数级,热点查延迟基本不动。</p>
+
+  <h2>🧰 Coding style:增量编码 · 折中旋钮 · 单趟回调避免 O(n²)</h2>
+  <ul>
+    <li><strong>增量/差分编码(delta encoding)</strong>:只存"与前一条的差"是<strong>无损压缩</strong>的一种基本招。前缀压缩、<code>git</code> 的 packfile、视频的 P 帧、protobuf 的 varint delta、时序库的 Gorilla 编码——全是"<strong>相邻数据高度相似 → 只记差异</strong>"。restart 点则是给"纯增量流"插的<strong>随机访问锚</strong>。</li>
+    <li><strong>用一个参数表达折中(<code>restart_interval</code>)</strong>:K 一个旋钮,同时控制"压缩率"和"查找成本",且<strong>两端极值都有用</strong>——K=16 给数据块吃满压缩,K=1 给索引块换回随机访问。同一份代码靠参数服务两种需求,比写两个 builder 干净。</li>
+    <li><strong>单趟回调而非"按 i 查"</strong>:<code>for_each_entry(FnMut)</code> 一趟 O(n) 解全块;若保留 <code>entry_at(i)</code> 在前缀压缩下就是"每个 i 从头重建" = O(n²)。当数据有<strong>顺序依赖</strong>(第 i 条要靠前 i−1 条),就别提供"随机第 i 个"的假象接口——<strong>顺序消费用回调/迭代器</strong>。</li>
+  </ul>
+
+  <h2>🧠 System mindset:相邻相似性 · 锚点索引 · 压缩/访问的对偶</h2>
+  <table>
+    <thead><tr><th>概念</th><th>本阶段怎么体现 / 跨域同构</th></tr></thead>
+    <tbody>
+      <tr><td><strong>利用相邻相似性</strong></td><td>排序让相邻 key 前缀相似 → 前缀压缩才有收益。<strong>先排序再压缩</strong>是通用前置(列存按列排序后压缩、LZ 的滑动窗口、字典编码)。块化 + 排序为这一步<strong>铺好了路</strong>。</td></tr>
+      <tr><td><strong>锚点 + 增量</strong></td><td>restart=完整锚,中间=增量。这是"<strong>关键帧 + 差分帧</strong>"模式:视频 I/P 帧、数据库 full + incremental backup、日志 checkpoint + delta、LSM 本身(SST=快照 + WAL=增量)。锚的密度永远是"恢复/查找速度 ↔ 体积"的旋钮。</td></tr>
+      <tr><td><strong>压缩与随机访问对偶</strong></td><td>压得越狠(K 越大)→ 随机定位越贵(段内扫越长)。这对张力无处不在:gzip 不可随机 seek、<code>zstd</code> 的 seekable 格式靠分块、parquet 的 row group、列存的 page。<strong>"可 seek 的压缩"几乎总是靠分块 + 块内锚点</strong>——你刚亲手实现了一个最小版。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:任何"既要小、又要能随机查"的格式,答案几乎都是<strong>分块 + 块内锚点 + 锚间增量</strong>。块大小 ↔ IO 粒度,锚间隔 ↔ 压缩/查找折中。理解了 RocksDB 的 data block,你就理解了 parquet page、zstd-seekable、视频 GOP 的同一套骨架。</p>
+
+  <h2>🧪 Harness 系统:前缀重建差分 + restart 边界</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">前缀压缩最容易错在<strong>重建</strong>:<code>shared</code> 算错一位、<code>truncate</code> 用错长度、跨 restart 段时忘了 key 应从完整锚重置——结果是<strong>某些 key 读出来变形</strong>。差分(vs <code>BTreeMap</code>)能逮住它,但前提是<strong>强制多 restart 段</strong>:测试要么调小 <code>restart_interval</code>(如 4),要么喂足够多条,让块里出现 ≥2 个 restart,才覆盖"跨段重置"这条最危险的路径。再加 <strong>restart 边界键</strong>(每段第一条=完整 key、每段最后一条、段与段交界)逐个命中。还要一条<strong>前缀对抗</strong>用例:<code>["a","ab","abc","b"]</code> —— 共享前缀递增后又跌回 0(<code>"b"</code>),专测 <code>truncate(shared)</code> 在 shared 变小时是否正确截断。</p>
+  </div>
+
+  <h3>代码 4 — harness(<code>block.rs</code> tests)</h3>
+  <pre>    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">block_roundtrip_prefix</span>() {
+        <span class="k">let</span> <span class="k">mut</span> b = BlockBuilder::<span class="f">with_restart_interval</span>(4); <span class="c">// 强制多 restart 段</span>
+        b.<span class="f">add</span>(b<span class="s">"user:00001"</span>, b<span class="s">"a"</span>); b.<span class="f">add</span>(b<span class="s">"user:00002"</span>, b<span class="s">"b"</span>);
+        b.<span class="f">add</span>(b<span class="s">"user:00010"</span>, b<span class="s">""</span>);  b.<span class="f">add</span>(b<span class="s">"user:00100"</span>, b<span class="s">"d"</span>);
+        b.<span class="f">add</span>(b<span class="s">"user:01000"</span>, b<span class="s">"e"</span>); <span class="c">// 跨 restart 段</span>
+        <span class="k">let</span> blk = Block::<span class="f">decode</span>(b.<span class="f">finish</span>());
+        <span class="f">assert_eq!</span>(blk.<span class="f">get</span>(b<span class="s">"user:00001"</span>), Some(&b<span class="s">"a"</span>[..]));   <span class="c">// 段首=完整 key</span>
+        <span class="f">assert_eq!</span>(blk.<span class="f">get</span>(b<span class="s">"user:00010"</span>), Some(&b<span class="s">""</span>[..]));    <span class="c">// 空 value 不丢</span>
+        <span class="f">assert_eq!</span>(blk.<span class="f">get</span>(b<span class="s">"user:01000"</span>), Some(&b<span class="s">"e"</span>[..]));   <span class="c">// 跨段命中</span>
+        <span class="f">assert_eq!</span>(blk.<span class="f">get</span>(b<span class="s">"user:00003"</span>), None);          <span class="c">// 段内不存在</span>
+        <span class="f">assert_eq!</span>(blk.<span class="f">get</span>(b<span class="s">"aaa"</span>), None);                 <span class="c">// 小于第一个 restart</span>
+    }
+
+    <span class="c">// 零拷贝仍在:value 借入块缓冲(key 重建是 owned,value 不拷)。</span>
+    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">get_value_borrows_into_block_buffer</span>() { <span class="c">/* v.as_ptr() ∈ block.data 区间 */</span> }
+
+    <span class="c">// 索引块路径:restart_interval=1 → len()==条数,collect_entries 解全。</span>
+    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">dense_restarts_for_index_block</span>() { <span class="c">/* … */</span> }</pre>
+  <p style="font-size:.92em;color:var(--soft)">参考实现还含 <code>matches_btreemap_oracle</code> 的前缀压缩版(<code>with_block_size</code> 调小强制多块 + 多段)、以及前缀对抗 <code>["a","ab","abc","b"]</code>。<code>sst.rs</code> 的三条既有 harness(读放大不变量 / 跨块边界 / 差分)<strong>原样照过</strong>——这证明前缀压缩对 reader 完全透明。</p>
+
+  <div class="done"><div class="kicker">E4 判定 — 全绿</div><p style="margin:.3em 0 0"><code>block::tests::block_roundtrip_prefix ... ok</code><br><code>block::tests::dense_restarts_for_index_block ... ok</code><br><code>sst::tests::*</code>(读放大 / 边界 / 差分)+ <code>engine::tests::*</code> 全部回归<br><strong>18 passed; 0 failed</strong> · bench 磁盘 116.1MB(−24% vs flat)</p></div>
+
+  <h2>🔄 CI/CD:restart_interval 矩阵</h2>
+  <p>E2 提过 <code>block_size</code> 矩阵。E4 再加一维:<code>restart_interval ∈ {1, 4, 16}</code> 各跑差分,证明"<strong>任意锚密度下重建都自洽</strong>"——K=1(无压缩)、K=4(密锚)、K=16(默认)。K=1 是关键对照:它退化成"无前缀压缩",若 K=1 和 K=16 差分结果不一致,就说明重建逻辑在压缩路径上有 bug。<strong>用"关掉优化的退化档"当 oracle 对照优化档</strong>,是性能优化类改动的标准 harness 设计。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">E4 想透这几个</div>
+    <ol>
+      <li><strong>K 怎么选?</strong> restart_interval 大 → 省空间但段内扫长,小 → 反之。RocksDB 默认 16。如果你的 value 很大(key 占比小),K 该调大还是调小?(提示:key 占比小时,前缀压缩省的那点 key 字节<strong>无足轻重</strong>,不如调大 K 减少 restart 数组开销;反之 key 长 value 短时,压缩收益大,但也要留住可二分性。)</li>
+      <li><strong>为什么索引块不前缀压缩?</strong> data block 用 K=16,index block 偏要 K=1。除了"<code>len()==条数</code>"的便利,还有什么道理?(提示:索引块<strong>小</strong>(每块才一条),压它省不了几个字节;但它要支持 reader <strong>随机/顺序解全部</strong>,K=1 让每条都能独立解。<strong>小而要随机访问的结构,不值得为压缩牺牲可访问性</strong>。)</li>
+      <li><strong>随机 key 怎么办?</strong> 我们的 <code>{:016}</code> 数字 key 前缀高度相似,压得动。但若 key 是 <code>SHA256</code> 这种随机散列,前缀压缩几乎<strong>白干</strong>。这时磁盘还能怎么省?(提示:前缀压缩吃<strong>结构相似性</strong>,通用压缩(<code>lz4</code>/<code>zstd</code>)吃<strong>统计冗余</strong>——后者对随机散列也无能为力,但对真实 value(JSON、文本)有效。两者<strong>正交</strong>,可叠加。这正是 <strong>E5</strong>。)</li>
+      <li><strong>零拷贝兑现了吗?</strong> <code>Block::get</code> 重建 key 到一个临时 <code>Vec</code>(owned),但 value 仍返回借入块缓冲的 <code>&amp;[u8]</code>。key 为何只能 owned?(提示:压缩后 key 在缓冲里<strong>不连续</strong>(前缀在别处),没法用一个切片表示;value 字节仍连续,所以 value 零拷贝、key 必须重建。Phase F 的迭代器会复用一个 <code>cur</code> buf 跨条<strong>增量重建</strong>,摊薄这点开销。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:E5 — 块尾 CRC + 压缩(lz4).</strong> 前缀压缩吃的是 key 的结构相似性;对 value 的统计冗余无能为力。E5 给每块加 RocksDB 式<strong>块尾</strong> <code>[type:1][crc32:4]</code>:<code>type</code> 记压缩算法,<code>crc</code> 在读时校验完整性;用 <code>lz4_flex</code> 压<strong>整个数据块</strong>(可开关)。磁盘赢面在此<strong>叠满</strong>(对真实 value 可再降一截),代价是读路径多付<strong>解压 + CRC 校验</strong>的 CPU——回 E3 把这笔账量化出来。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_builder.cc">block_builder.cc</a>(<code>Add</code> 前缀共享 · <code>Finish</code> restarts)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block.cc">block.cc</a>(<code>BlockIter::Seek</code> restarts 二分 + <code>ParseNextKey</code> 重建)。</p>
+    <p>想完跟我对答案,或说"继续 E5"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

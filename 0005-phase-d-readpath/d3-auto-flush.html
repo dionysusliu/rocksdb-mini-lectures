@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D3 · 满了自动 flush — M1 MVP 达成</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="d2-immutable-merge.html">← D2</a> &nbsp;·&nbsp; <a href="index.html">Phase D</a> &nbsp;·&nbsp; D3 &nbsp;·&nbsp; <span style="color:#3a6b3a">🏁 M1 MVP</span></div>
+
+  <div class="kicker">STEP D3 · Phase D 读路径</div>
+  <h1>满了自动 flush — M1 MVP 达成</h1>
+  <p>到这里读写两条路都通了,只剩一件事手动:<strong>什么时候落盘</strong>。还记得 Phase A3 给 MemTable 加的 <code>is_full(threshold)</code> 信号吗?它一直在那儿空等。这一步把它接上动作:<strong><code>put</code> 后一旦 active 满了,自动 flush。</strong> 引擎第一次能"自己照顾自己"——不再需要外部手动调 flush。</p>
+  <p>但自动 flush 上线前,要先补 D2 留的那个 TODO:<strong><code>flush</code> 落盘后截断 WAL</strong>。D2 手动 flush 时不截还能将就(WAL 只是不回收);可一旦 <code>put</code> 自动触发 flush,<strong>不截的 WAL 会随每次写无限增长</strong>——重启重放越来越慢、磁盘越占越多。所以本课分两半:<strong>① 补上 flush 的 WAL 截断;② 接上自动触发。</strong></p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">① 在 <code>flush</code> 末尾补上 <code>self.wal = Wal::reset(...)</code>,落盘后截断 WAL(填掉 D2 的 TODO)。② 给 <code>Engine</code> 加 <code>flush_threshold: usize</code> 字段;<code>put</code> 末尾检测 <code>self.mem.is_full(threshold)</code>,满则调 <code>flush()</code>。加 <code>set_flush_threshold</code> 便于测试调小阈值。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 把阈值调小后狂写、<strong>不手动 flush</strong>,磁盘上自己冒出 SST 且全部 key 仍可读;flush 后 WAL 被截断(重启不再重放已落盘的 key,WAL 不随写无限增长)。</p>
+  </div>
+
+  <h2>第一半 — 补上 flush 的 WAL 截断(D2 的 TODO)</h2>
+  <p>D2 的 <code>flush</code> 把内存全排空成 SST,却<strong>没截 WAL</strong>——留了行 TODO。现在补上:落盘成功后,内存里啥都不剩了,WAL 保护的那批数据已全在 SST 上,<strong>整截 WAL 才安全</strong>。</p>
+
+  <h3>代码 0 — 在 flush 末尾填掉 TODO</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">flush</span>(&mut self) -> Result&lt;Vec&lt;PathBuf&gt;&gt; {
+        self.<span class="f">freeze</span>();
+        <span class="k">let</span> <span class="k">mut</span> paths = Vec::<span class="f">new</span>();
+        <span class="k">while</span> <span class="k">let</span> Some(imm) = self.imm.<span class="f">pop</span>() {
+            <span class="c">// …逐个 imm 落盘(D2 已写)…</span>
+        }
+<span class="add">+       // D2 的 TODO 在此填上:内存已排空 → 整截 WAL 安全。</span>
+<span class="add">+       self.wal = Wal::reset(&self.dir.join("wal.log"))?;</span>
+        Ok(paths)
+    }</pre>
+
+  <div class="warnbox"><strong>为什么"内存全空才敢整截 WAL"是铁律.</strong> WAL 保护的是<strong>所有还在内存</strong>的数据(active + 每个 imm)。若只 flush 一个 imm 就截 WAL,其它 imm + active 的数据会被从 WAL 抹掉、却还没落盘 → 崩了就丢。MVP 用最简单的安全策略:<strong>flush 一次性把内存全倒空,才整截 WAL</strong>。RocksDB 能"只 flush 最旧那张表、只回收对应 WAL 段",靠的是给每张表/每段 WAL 编 <strong>log number</strong> 并在 MANIFEST 记账——那是 Phase L + X。这也正是 D2 核心问题 #4、本课核心问题 #3 指向的同一处简化:<strong>"满了就排空全部内存"和"内存全空才截 WAL"是一对绑定的 MVP 取舍</strong>。</div>
+
+  <div class="warnbox"><strong>为什么这件事拖到自动 flush 才必须做.</strong> D2 手动 flush 时不截 WAL 顶多是"WAL 不回收、重启多重放一遍",将就得过去。可 D3 让 <code>put</code> <strong>自动</strong>触发 flush 后,每攒满一批就 flush 一次——若仍不截,WAL 会<strong>随写入无限增长</strong>:重启重放越来越慢、磁盘越占越多。<strong>自动化把一个"能将就的瑕疵"放大成"必须修的 bug"</strong>——这正是该在本课补它的原因。</div>
+
+  <h3>为什么 flush 该是后台、而非写路径同步(诚实标注锚)</h3>
+  <p>我们 MVP 在 <code>put</code> 里<strong>同步</strong>调 <code>flush</code>——简单,但有代价:flush 是<strong>慢磁盘 IO</strong>,把它放在写路径上,触发那一刻的 <code>put</code> 会被<strong>卡住</strong>等落盘完成(尾延迟尖峰)。真 RocksDB 的写路径只做一件快事——<strong>switch memtable</strong>(active 转 imm,装新表,几乎瞬时),然后<strong>给后台线程派一个 flush job</strong> 就立刻返回;落盘在后台慢慢做。只有当<strong>imm 堆积过多</strong>(写比 flush 快)才反过来<strong>挡住写</strong>(write stall)。我们把"后台线程 + 背压"整体简化成"同步 flush",并诚实标注:<strong>这是 Phase W(write stall / 限速)要补的洞</strong>。</p>
+  <span class="src">对标 DBImpl::SwitchMemtable + 后台 flush 调度 · 背压:write_controller.cc(Phase W)</span>
+
+  <h2>第二半 — 接上自动触发</h2>
+  <ol class="steps">
+    <li>给 <code>Engine</code> 加 <code>flush_threshold</code> 字段,<code>open</code> 里给个默认值(如 4 MiB)(「代码 1」)。</li>
+    <li><code>put</code> 末尾接 <code>is_full</code> 自动 flush;加 <code>set_flush_threshold</code>(「代码 2」)。</li>
+    <li>敲入「代码 3」自触发 harness,跑 <code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — 加阈值字段</h3>
+  <pre><span class="k">pub struct</span> <span class="t">Engine</span> {
+    dir: PathBuf, mem: MemTable, imm: Vec&lt;Arc&lt;MemTable&gt;&gt;,
+    ssts: Vec&lt;SstReader&gt;, wal: Wal, next_sst: u64,
+<span class="add">+   flush_threshold: usize,   // active 超过此字节数 → 自动冻结+flush</span>
+}
+<span class="c">// open(...) 构造 Self 时加上:</span>
+<span class="add">+   flush_threshold: 4 * 1024 * 1024,   // 4 MiB 默认</span></pre>
+
+  <h3>代码 2 — <code>put</code> 自动触发 + 阈值 setter</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">put</span>(&mut self, key: Key, value: Value) -> Result&lt;()&gt; {
+        self.wal.<span class="f">append</span>(&key, &value)?;
+        self.wal.<span class="f">sync</span>()?;
+        self.mem.<span class="f">put</span>(key, value);
+<span class="add">+       // active 满了就自动落盘。MVP 同步(会堵写路径=write stall,Phase W);</span>
+<span class="add">+       // 真 RocksDB 是写路径只切表、后台线程 flush。</span>
+<span class="add">+       if self.mem.is_full(self.flush_threshold) {</span>
+<span class="add">+           self.flush()?;</span>
+<span class="add">+       }</span>
+        Ok(())
+    }
+
+<span class="add">+   /// 测试/调参用:把自动 flush 阈值调小,演示自动落盘。</span>
+<span class="add">+   pub fn set_flush_threshold(&mut self, bytes: usize) { self.flush_threshold = bytes; }</span></pre>
+
+  <div class="warnbox"><strong>顺序仍是铁律.</strong> 自动 flush 放在 <code>self.mem.put(..)</code> <strong>之后</strong>:先把这条写真正落进 active(且 WAL 已 sync),再判断要不要 flush。反过来先判断后 put,会漏掉"正是这条 put 让表变满"的情况。</div>
+
+  <h2>🧰 Coding style:策略与机制分离 · 阈值即策略</h2>
+  <ul>
+    <li><strong>policy / mechanism 分离</strong>:<code>flush()</code> 是<strong>机制</strong>(怎么落盘),<code>is_full(threshold)</code> 是<strong>策略</strong>(何时该落盘)。把"多大算满"做成一个可注入的字段(<code>flush_threshold</code> + <code>set_flush_threshold</code>),而非硬编码,就能让测试用 64 字节、生产用 64 MB,机制一行不改。这是<strong>"把会变的参数从会稳定的逻辑里拎出来"</strong>的通用范式,见于内核调度策略、GC 触发阈值、限流器配置。</li>
+    <li><strong>触发器贴着状态变化点</strong>:满判定紧跟在唯一会让表变大的操作(<code>put</code>)之后——<strong>状态一变就立刻检查不变量/触发条件</strong>,而不是另起一个轮询循环去问"满了没"。事件驱动胜过轮询,延迟更低、逻辑更局部。</li>
+  </ul>
+
+  <h2>🧠 System mindset:背压与流量控制 · 同步 vs 异步落盘</h2>
+  <p>"生产快于消费,中间缓冲会涨;涨到某个水位就得采取行动"——这是<strong>背压(backpressure)</strong>,贯穿所有有生产/消费速差的系统:</p>
+  <table>
+    <thead><tr><th>领域</th><th>"缓冲涨到水位就行动"长这样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>网络(★)</strong></td><td>TCP 流量控制:接收窗口满 → 通告 zero window 让发送方停;拥塞控制按丢包/RTT 退避</td></tr>
+      <tr><td><strong>操作系统</strong></td><td>脏页回写:dirty page 比例过高 → <code>pdflush</code>/回写线程落盘;再高则<strong>阻塞写者</strong>(我们的同步 flush 正是这种"阻塞写者")</td></tr>
+      <tr><td><strong>消息/流</strong></td><td>Kafka/Reactive Streams:消费跟不上 → 缓冲、丢弃、或反压上游限速</td></tr>
+      <tr><td><strong>HPC</strong></td><td>双缓冲 / 流水线:一块算、一块 IO;若 IO 慢于计算,计算就得等(=stall)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:我们当前是<strong>最朴素的背压——直接在写者线程里同步消费(flush)</strong>,等于"缓冲一满就让生产者亲自去倒"。它简单、绝不丢数据,但<strong>把慢 IO 的延迟直接传导给写延迟</strong>(脏页回写阻塞写者、TCP 发送阻塞,都是这个味道)。进阶做法是<strong>解耦</strong>:后台线程消费(异步 flush),写者只在缓冲<strong>逼近上限</strong>时才被限速(RocksDB 的 slowdown/stop 双水位,Phase W)。<strong>"同步消费 vs 异步消费 + 水位限速"</strong>这对取舍,你会在写存储、调网络、设计任何队列时反复遇到——朴素同步先保正确,异步 + 背压再要吞吐。</p>
+
+  <h2>🧪 Harness 系统:自触发不变量</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">前面的 harness 都<strong>显式</strong>调 flush。这个要验的是<strong>引擎自己会不会动</strong>:把阈值调到极小(64 字节),只管狂 <code>put</code>、<strong>一次都不手动 flush</strong>,然后断言两件事——(1) 磁盘上<strong>确实自发</strong>冒出了 SST 文件(<code>000000.sst</code> 存在);(2) 数据散落在 active/imm/SST 各处,但<strong>全部仍可读</strong>。这是"<strong>自触发不变量</strong>":系统在无人干预下,既要主动达成某个目标态(落盘),又不能在自动化过程中破坏对外契约(可读性)。同类验法用于自动伸缩、自动 GC、自愈系统——验"它该动时动了,且动的过程没搞坏别的"。</p>
+  </div>
+
+  <h3>代码 3 — 自触发 harness(接 tests)</h3>
+  <pre>    <span class="c">// D3:阈值调小后,put 自动触发 flush——无需手动调,数据自己落盘且可读。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">auto_flush_on_full</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        e.<span class="f">set_flush_threshold</span>(64);                  <span class="c">// 极小阈值,几次 put 就满</span>
+        <span class="k">for</span> i <span class="k">in</span> 0..20u32 {
+            <span class="k">let</span> k = format!(<span class="s">"key{i:02}"</span>);
+            e.<span class="f">put</span>(<span class="f">bytes</span>(&k), <span class="f">bytes</span>(<span class="s">"payload-bytes"</span>)).<span class="f">unwrap</span>();
+        }
+        <span class="c">// 没手动 flush,但应已有 SST 落盘:</span>
+        <span class="f">assert!</span>(dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"000000.sst"</span>).<span class="f">exists</span>(),
+                <span class="s">"auto-flush 应已写出至少一个 SST"</span>);
+        <span class="c">// 全部 key 仍可读(分布在 active/imm/SST):</span>
+        <span class="k">for</span> i <span class="k">in</span> 0..20u32 {
+            <span class="k">let</span> k = format!(<span class="s">"key{i:02}"</span>);
+            <span class="f">assert_eq!</span>(e.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">as_deref</span>(), Some(&b<span class="s">"payload-bytes"</span>[..]));
+        }
+        <span class="c">// WAL 已截断也不丢数据:重开后全部 key 仍在(已落盘的来自 SST,未满那批来自 WAL 尾)。</span>
+        drop(e);
+        <span class="k">let</span> e2 = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="k">for</span> i <span class="k">in</span> 0..20u32 {
+            <span class="k">let</span> k = format!(<span class="s">"key{i:02}"</span>);
+            <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">as_deref</span>(), Some(&b<span class="s">"payload-bytes"</span>[..]));
+        }
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">D3 判定 — Phase D 全绿(10 测试)</div><p style="margin:.3em 0 0"><code>engine::tests::auto_flush_on_full ... ok</code><br><code>engine::tests::layered_lookup_differential ... ok</code><br><code>engine::tests::reopen_rediscovers_ssts ... ok</code> … 等 7 个 engine + 3 个 sst<br><code>test result: ok. 10 passed; 0 failed</code></p></div>
+
+  <h2>🔄 CI/CD:Phase D 完整三档</h2>
+  <p>Phase D 收尾,流水线定型为三档并行:<code>test</code>(单元快档)· <code>integration</code>(端到端慢档,D 新增)· <code>lint</code>(fmt + clippy 门)。</p>
+  <pre><span class="c"># .github/workflows/ci.yml — Phase D 完整版(已本地全绿验证)</span>
+<span class="t">name</span>: ci
+<span class="t">on</span>: { <span class="t">push</span>: { <span class="t">branches</span>: [main] }, <span class="t">pull_request</span>: }
+<span class="t">jobs</span>:
+  <span class="t">test</span>:                       <span class="c"># C1/C3:单元 + cache</span>
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - { <span class="t">uses</span>: actions/checkout@v4 }
+      - { <span class="t">uses</span>: dtolnay/rust-toolchain@stable }
+      - { <span class="t">uses</span>: Swatinem/rust-cache@v2 }
+      - <span class="t">run</span>: cargo test --all --verbose
+  <span class="t">integration</span>:                <span class="c"># D 新增:端到端/长跑差分,单线程+nocapture</span>
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - { <span class="t">uses</span>: actions/checkout@v4 }
+      - { <span class="t">uses</span>: dtolnay/rust-toolchain@stable }
+      - { <span class="t">uses</span>: Swatinem/rust-cache@v2 }
+      - <span class="t">run</span>: cargo test --all engine::tests -- --nocapture --test-threads=1
+  <span class="t">lint</span>:                       <span class="c"># C2:格式 + clippy 门</span>
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - { <span class="t">uses</span>: actions/checkout@v4 }
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+        <span class="t">with</span>: { <span class="t">components</span>: rustfmt, clippy }
+      - <span class="t">run</span>: cargo fmt --all --check
+      - <span class="t">run</span>: cargo clippy --all-targets -- -D warnings</pre>
+  <p style="font-size:.9em;color:var(--soft)">已本地全验:<code>cargo test --all</code> 10 绿、<code>engine::tests</code> 过滤 7 绿、<code>fmt --check</code> 干净、<code>clippy -D warnings</code> 干净。<strong>CI/CD 弧线小结(C→D)</strong>:bootstrap test → fmt/clippy 门 → cache 提速 → <strong>测试分层(单元/集成)</strong>。后续 Phase R/AF 加性能回归门,M5 加多平台矩阵 + 覆盖率。</p>
+
+  <div class="milestone">
+    <div class="kicker" style="color:#3a6b3a">🏁 MILESTONE M1 — MVP 引擎达成</div>
+    <p style="margin:.3em 0 0">Put / Get / 重启持久 / flush 全闭环。你手上第一次有了一个<strong>最小但完整</strong>的 LSM 引擎:写进内存表(WAL 保命)→ 满了倒成有序 SST → 读穿 active+imm+SST 新到旧 → 重启从盘上重建。<strong>路线图开头说的"先跑通 MVP",到此成真。</strong></p>
+  </div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">D3 / Phase D 收尾</div>
+    <ol>
+      <li><strong>同步 flush 的延迟代价</strong>:用 <code>cargo test -- --nocapture</code> 或加个计时,观察触发 flush 的那次 <code>put</code> 比普通 <code>put</code> 慢多少。如果一个客户端正等这次 <code>put</code> 返回,它体验到的尾延迟是多少?这就是 write stall 的雏形——为什么生产引擎必须把 flush 推到后台?</li>
+      <li><strong>阈值定多大</strong>:阈值太小 → SST 又多又小(读放大、文件句柄爆、compaction 压力大);太大 → 内存占用高、单次 flush 卡顿久、崩溃丢的未落盘数据多。RocksDB 默认 <code>write_buffer_size</code> 64MB,凭什么?(想想:它要平衡内存、单次 flush 时长、L0 文件数。没有银弹,是个可调旋钮。)</li>
+      <li><strong>auto-flush 触发的是排空全部内存</strong>:我们的 <code>flush</code> 会 freeze + 排空所有 imm。但"满了"只是 active 满,为什么要顺手把之前 freeze 的 imm 也一起落?(MVP 的 WAL 整截策略要求内存全空才安全——回顾 D2 的 warnbox。这也暴露了 MVP 的粗糙:真引擎该只 flush 该 flush 的那张表。Phase L 的 log number 解锁精细控制。)</li>
+      <li><strong>崩溃窗口</strong>:自动 flush 在后台(未来)进行时崩溃,会怎样?哪些数据在 WAL、哪些在半截 SST、哪些已安全?把 Phase B 的崩溃恢复 + Phase C 核心问题 #1(半截 SST 识别)+ 本课串起来想一遍——这就是 LSM 的<strong>崩溃一致性全景</strong>,Phase L(MANIFEST)是收口的关键。</li>
+    </ol>
+  </div>
+
+  <h2>Phase D 完成 · 累计收获</h2>
+  <div class="done">
+    <p style="margin:.2em 0"><code>cargo test</code> 全绿(10 测试)。新得 harness 系统:<strong>重启重发现(跨进程)</strong>、<strong>分层查找差分(旗舰)</strong>、<strong>自触发不变量</strong>。累计 10 种 harness。</p>
+    <p style="margin:.2em 0">读路径补完,引擎闭环。<strong>四支柱可迁移收获</strong>本阶段:🧰 Option 组合子链 / Arc 共享不可变 / mem::take / 策略机制分离 · 🧠 分层覆盖(PATH/原型链/OverlayFS)+ 读时归并(外排/MapReduce/RCU)+ 背压(TCP/脏页回写)· 🧪 差分/重发现/自触发 · 🔄 测试分层(单元 vs 集成档)。</p>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase E — block 化 SST(进 Tier 2,迈向 M2).</strong> 当前 SST 是"全量索引 + 整文件载入"。Phase E 把它切成 <strong>data block + restart points + 块索引(key 前缀压缩)</strong>,为 block cache(S)与按块读铺路。再往后 F(SST iterator)→ G(k 路归并 iterator,把本课的"点查命中即停"升级成"范围扫描多路归并")→ H/I/J(InternalKey/墓碑/快照)解锁删除与时间旅行。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/flush_job.cc">flush_job.cc</a>(后台 flush 调度) · <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl_write.cc">db_impl_write.cc</a>(写路径里的 switch memtable 决策)。</p>
+    <p><strong>对照参考.</strong> 卡住可 diff worktree 的 <code>reference/engine.rs</code>(Phase D 的 canonical 解,已 10 测试全绿)。</p>
+    <p>想完跟我对答案,或说"开 Phase E"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

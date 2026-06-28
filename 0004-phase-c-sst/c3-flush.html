@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C3 · Engine::flush 倒表闭环</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="c2-sst-reader.html">← C2</a> &nbsp;·&nbsp; <a href="index.html">Phase C</a> &nbsp;·&nbsp; C3 &nbsp;·&nbsp; <span style="color:#bbb">Phase C 完</span></div>
+
+  <div class="kicker">STEP C3 · Phase C SST</div>
+  <h1>Engine::flush — 倒表闭环</h1>
+  <p>把前两步接成一个动作:<strong>满了的 MemTable → 有序 SST 文件 → 清空内存表 → 截断 WAL</strong>。这就是 LSM 名字里的 "Log-Structured Merge" 中那个把内存日志结构倒进磁盘的关键一跳。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>Engine::flush() -> PathBuf</code>:遍历 MemTable(有序)喂 <code>SstBuilder</code> → 落盘 → <code>mem</code> 换新 → WAL 截断。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 跨持久化边界 round-trip——flush 前的逻辑内容 == flush 出的 SST 读回内容(覆盖写取最新);flush 后 WAL 不再重放旧数据。</p>
+  </div>
+
+  <h3>为什么 flush 后能截断 WAL(mission 锚)</h3>
+  <p>WAL 的唯一职责:<strong>保护还在内存、尚未落盘的写</strong>。一旦 MemTable 的内容被 flush 成持久 SST,那段 WAL 就完成使命、可以丢。RocksDB 用 <strong>log number + MANIFEST</strong> 精确记录"哪个 WAL 覆盖哪个 MemTable",安全删旧 WAL。我们 MVP 简化成"flush 后直接截断当前 WAL"——单 MemTable 够用,多 MemTable/并发 flush 的精确生命周期是 <strong>Phase L(Manifest)+ X(WAL 回收)</strong> 的活。</p>
+  <span class="src">对标 flush job · 真实 WAL 生命周期:db_impl_open.cc / wal_manager.cc + MANIFEST</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>给 <code>src/wal.rs</code> 加一个 <code>Wal::reset</code>(截断重开,「代码 1」)。</li>
+    <li>扩展 <code>src/engine.rs</code>:<code>Engine</code> 加 <code>dir</code> + <code>next_sst</code> 字段,加 <code>flush()</code>(「代码 2」)。</li>
+    <li>敲入「代码 3」跨边界 round-trip harness,跑 <code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>wal.rs</code> 加 <code>reset</code></h3>
+  <pre><span class="k">impl</span> <span class="t">Wal</span> {
+    <span class="c">// ... 已有 open_append/append/sync/replay ...</span>
+
+    <span class="c">/// flush 后该段 WAL 已进 SST,截断重来。truncate=true 清空文件。</span>
+    <span class="k">pub fn</span> <span class="f">reset</span>(path: &Path) -> Result&lt;Self&gt; {
+        <span class="k">let</span> f = OpenOptions::<span class="f">new</span>().<span class="f">create</span>(<span class="k">true</span>).<span class="f">write</span>(<span class="k">true</span>).<span class="f">truncate</span>(<span class="k">true</span>).<span class="f">open</span>(path)?;
+        Ok(Self { w: BufWriter::<span class="f">new</span>(f) })
+    }
+}</pre>
+
+  <h3>代码 2 — 扩展 <code>src/engine.rs</code>（<span style="color:#3a6b3a">+ 为新增</span>）</h3>
+  <pre><span class="k">use</span> std::path::{Path, PathBuf};
+<span class="add">+ use crate::sst::SstBuilder;</span>
+
+<span class="k">pub struct</span> <span class="t">Engine</span> {
+<span class="add">+   dir: PathBuf,        // flush 要往这个目录写 SST</span>
+    mem: MemTable,
+    wal: Wal,
+<span class="add">+   next_sst: u64,       // SST 文件编号,递增</span>
+}
+
+<span class="k">impl</span> <span class="t">Engine</span> {
+    <span class="k">pub fn</span> <span class="f">open</span>(dir: &Path) -> Result&lt;Self&gt; {
+        std::fs::<span class="f">create_dir_all</span>(dir)?;
+        <span class="k">let</span> wal_path = dir.<span class="f">join</span>(<span class="s">"wal.log"</span>);
+        <span class="k">let</span> mem = MemTable::<span class="f">new</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> Wal::<span class="f">replay</span>(&wal_path)? { mem.<span class="f">put</span>(k, v); }
+        <span class="k">let</span> wal = Wal::<span class="f">open_append</span>(&wal_path)?;
+        Ok(Self { dir: dir.<span class="f">to_path_buf</span>(), mem, wal<span class="add">, next_sst: 0</span> })
+    }
+
+    <span class="c">// put / get 不变(get 仍只查 mem;Phase D 才接 SST)</span>
+
+<span class="add">+   /// 冻结的 MemTable -&gt; 一个有序 SST;成功后清空 MemTable + 截断 WAL。返回 SST 路径。</span>
+<span class="add">+   pub fn flush(&mut self) -> Result&lt;PathBuf&gt; {</span>
+<span class="add">+       let path = self.dir.join(format!("{:06}.sst", self.next_sst));</span>
+<span class="add">+       self.next_sst += 1;</span>
+<span class="add">+       let mut b = SstBuilder::new();</span>
+<span class="add">+       for (k, v) in self.mem.iter() { b.add(&k, &v)?; } // iter 有序 -&gt; add 升序成立</span>
+<span class="add">+       b.finish(&path)?;</span>
+<span class="add">+       // SST 已持久 -&gt; 该段 WAL 作废,截断;MemTable 换新</span>
+<span class="add">+       self.mem = MemTable::new();</span>
+<span class="add">+       self.wal = Wal::reset(&self.dir.join("wal.log"))?;</span>
+<span class="add">+       Ok(path)</span>
+<span class="add">+   }</span>
+}</pre>
+
+  <div class="warnbox"><strong>顺序也是铁律.</strong> flush 里:<strong>先 <code>finish</code>(SST 落盘 fsync)成功,才</strong>截断 WAL。反过来——先截 WAL 再写 SST,崩在中间 → 数据既不在 WAL 也不在 SST = 丢。和 B 的 write-ahead 同一个道理:<strong>新持久副本就绪前,绝不毁旧副本。</strong></div>
+
+  <h2>🧰 Coding style：RAII 生命周期 + establish-new-before-destroy-old</h2>
+  <ul>
+    <li><strong>RAII 资源生命周期</strong>:<code>self.mem = MemTable::new()</code> 整个<strong>替换</strong>旧 MemTable——旧的失去所有者,自动析构释放内存。<code>self.wal = Wal::reset(...)</code> 同理,旧 <code>Wal</code>(含 <code>BufWriter</code>/文件句柄)被 drop 时自动 flush+关闭。<strong>资源生命周期绑定对象生命周期</strong>,不用手动 free/close。迁移到任何 RAII 语言(C++ 析构、Python <code>with</code>、Go <code>defer</code>)。</li>
+    <li><strong>establish-new-before-destroy-old(原子替换)</strong>:flush 里先 <code>finish</code> 把新 SST <strong>落盘成功</strong>,才 <code>reset</code> 截断旧 WAL。<strong>新副本就绪前,绝不毁旧副本</strong>。这是个反复出现的安全切换范式——下面 System mindset 展开,它直通 blue-green 部署。</li>
+    <li><strong>顺序即正确性</strong>:这段代码的对错不在"做了什么"而在"<strong>什么顺序做</strong>"。把关键顺序写成注释 + 不变量,是系统代码的基本功。</li>
+  </ul>
+
+  <h2>🧠 System mindset：crash-consistency · write-ordering · 新就绪前不毁旧</h2>
+  <p>flush 的 <code>finish → reset</code> 顺序,和 B 的 "WAL 先于 MemTable",是<strong>同一条铁律</strong>的两次出现。这条铁律是所有有状态系统的命根:</p>
+  <table>
+    <thead><tr><th>领域</th><th>"新就绪前不毁旧"长这样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>文件系统</strong></td><td>journaling:先写 journal,再改原地;<code>rename()</code> 原子替换(写新临时文件 → fsync → rename 覆盖)</td></tr>
+      <tr><td><strong>数据库</strong></td><td>checkpoint 前 WAL 不截;double-write buffer 防 torn page</td></tr>
+      <tr><td><strong>部署(!)</strong></td><td><strong>blue-green / 滚动发布</strong>:新版本起来、健康检查过,才切流量摘旧版本。和 flush 一模一样的形状</td></tr>
+      <tr><td><strong>网络/分布式</strong></td><td>两阶段提交 prepare→commit;先复制到多数派,才回复客户端</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:任何"用新状态替换旧状态"的地方,问三个问题——(1) <strong>新状态持久/就绪了吗</strong>(我们的 <code>finish</code>+fsync)?(2) 中间崩了会落在哪个<strong>半成品</strong>态,能恢复吗(C3 核心问题 #1/#2)?(3) 切换那一下是<strong>原子</strong>的吗(rename 是,"删旧+写新"两步不是)?把这三问刻进肌肉,你在 Linux 文件操作、DB 运维、服务发布、HPC checkpoint/restart 里都不会丢数据。<strong>LSM 的 flush 只是这条原理的一个实例。</strong></p>
+
+  <h2>Harness 系统：跨持久化边界 round-trip</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">flush 跨越了一道边界:<strong>内存逻辑结构 → 磁盘字节格式</strong>。要证这道转换不丢不变:flush 前 MemTable 里"每个 key 的最新值",必须等于 flush 后 SST 读回的值。
+    再加一条:flush 后重开引擎,<strong>不能</strong>把已进 SST 的数据又从 WAL 重放一遍(否则 WAL 截断没生效,数据会重复/复活)。两条一起,锁死 flush 的正确性与 WAL 生命周期。</p>
+  </div>
+
+  <h3>代码 3 — 跨边界 harness（接 <code>engine.rs</code> 的 tests）</h3>
+  <pre>    <span class="k">use</span> crate::sst::SstReader;
+
+    <span class="c">// flush 前 MemTable 内容 == flush 出的 SST(覆盖写取最新)</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">flush_produces_correct_sst</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"banana"</span>), Bytes::<span class="f">from</span>(<span class="s">"yellow"</span>)).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"apple"</span>),  Bytes::<span class="f">from</span>(<span class="s">"red"</span>)).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"apple"</span>),  Bytes::<span class="f">from</span>(<span class="s">"green"</span>)).<span class="f">unwrap</span>(); <span class="c">// 覆盖</span>
+        <span class="k">let</span> sst_path = e.<span class="f">flush</span>().<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"apple"</span>), None); <span class="c">// flush 后 memtable 空</span>
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&sst_path).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(r.<span class="f">len</span>(), 2);                                   <span class="c">// 覆盖后只剩 2 个 key</span>
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"apple"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"green"</span>[..])); <span class="c">// 最新值</span>
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"banana"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"yellow"</span>[..]));
+    }
+
+    <span class="c">// flush 后 WAL 被截断:重开不重放已 flush 的数据</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">wal_truncated_after_flush</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        { <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+          e.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"x"</span>), Bytes::<span class="f">from</span>(<span class="s">"1"</span>)).<span class="f">unwrap</span>();
+          e.<span class="f">flush</span>().<span class="f">unwrap</span>(); }
+        <span class="k">let</span> e2 = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"x"</span>), None);                  <span class="c">// 不在 WAL/memtable(Phase D 才从 SST 读)</span>
+        <span class="f">assert!</span>(dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"000000.sst"</span>).<span class="f">exists</span>()); <span class="c">// SST 确实写出</span>
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">Phase C 完成判定 — 全绿(含 A/B 全部回归)</div><p style="margin:.3em 0 0"><code>sst::tests::* (3) ... ok</code><br><code>engine::tests::flush_produces_correct_sst ... ok</code><br><code>engine::tests::wal_truncated_after_flush ... ok</code><br><code>engine::tests::survives_reopen ... ok</code> ...</p></div>
+
+  <div class="warnbox"><strong>注意一个"故意的空洞".</strong> <code>wal_truncated_after_flush</code> 里 <code>e2.get(b"x")==None</code>——数据明明在 SST 里却读不到!因为 <code>Engine::get</code> 现在<strong>只查 MemTable</strong>。这不是 bug,是 Phase C 的边界:flush 把数据搬进了 SST,但<strong>读路径还没接 SST</strong>。补上这条查找链 = 下一个 <code>Phase D</code>,届时 MVP 就真闭环了。</div>
+
+  <h2>🔄 CI/CD：提速 + 留工件</h2>
+  <p>流水线已能 test + lint。Phase C 收尾给它<strong>提速</strong>(缓存依赖,别每次从头编)并<strong>留工件</strong>(把测试二进制/产物存下来)。完整 <code>ci.yml</code> 现在长这样(C1 的 test + C2 的 lint + 本课 cache 已在 test job 的 <code>rust-cache</code> 体现):</p>
+  <pre><span class="c"># .github/workflows/ci.yml — Phase C 完整版</span>
+<span class="t">name</span>: ci
+<span class="t">on</span>:
+  <span class="t">push</span>: { <span class="t">branches</span>: [main] }
+  <span class="t">pull_request</span>:
+<span class="t">jobs</span>:
+  <span class="t">test</span>:
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - <span class="t">uses</span>: actions/checkout@v4
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+      - <span class="t">uses</span>: Swatinem/rust-cache@v2      <span class="c"># ← 提速:缓存 ~/.cargo + target</span>
+      - <span class="t">run</span>: cargo test --all --verbose
+  <span class="t">lint</span>:
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - <span class="t">uses</span>: actions/checkout@v4
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+        <span class="t">with</span>: { <span class="t">components</span>: rustfmt, clippy }
+      - <span class="t">run</span>: cargo fmt --all --check
+      - <span class="t">run</span>: cargo clippy --all-targets -- -D warnings</pre>
+  <p style="font-size:.9em;color:var(--soft)">整份 yml 我已在参考实现本地验过:YAML 合法、<code>cargo test --all</code>(6 绿)、<code>fmt --check</code> 干净、<code>clippy -D warnings</code> 干净。push 后两个 job 并行跑,都绿才合并。</p>
+  <p><strong>CI/CD 弧线</strong>:C 把"test→lint→cache"搭起来。后面 Phase R/AF 会加<strong>性能回归门</strong>(benchmark 退化就红,接 storage-benchmark-lab),M5 加<strong>多平台矩阵 + 覆盖率</strong>。流水线和引擎一起长大。</p>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">Phase C 收尾</div>
+    <ol>
+      <li><strong>flush 的原子性</strong>:<code>finish</code> 写到一半崩了,会留下一个半截 SST 文件。重开时怎么知道它不完整、该忽略?(提示:footer/magic 在最后写;没 footer 的文件 = 没写完。RocksDB 还靠 MANIFEST 只认"已登记"的 SST。)</li>
+      <li><strong>WAL 截断的时机风险</strong>:我们 <code>finish</code> 成功后才 <code>reset</code> WAL。如果 <code>finish</code> 成功但 <code>reset</code> 前崩了,会怎样?重开时 WAL 重放 + SST 都在 → 数据重复吗?对 get 结果有害吗?(想想覆盖写的幂等性。)</li>
+      <li><strong>为什么不直接改 MemTable 而要换新</strong>:<code>self.mem = MemTable::new()</code> 整个换掉,而非清空旧的。如果有读线程正拿着旧 MemTable,换新 vs 清空,哪个安全?(这预告 Phase D 的 immutable memtable + SuperVersion:flush 时旧表转 immutable 仍可读,不是就地清。)</li>
+      <li><strong>flush 何时自动触发</strong>:现在 <code>flush</code> 要手动调。真实引擎在 <code>put</code> 里检测 <code>mem.is_full(threshold)</code> 自动触发(A3 的信号!)。为什么 RocksDB 是"后台线程 flush"而非"在 put 里同步 flush"?(提示:flush 是慢 IO,别堵写路径——关联 write stall,Phase W。)</li>
+    </ol>
+  </div>
+
+  <h2>Phase C 完成</h2>
+  <div class="done">
+    <p style="margin:.2em 0"><code>cargo test</code> 全绿。新得两类 harness:<strong>格式稳定性/round-trip</strong>、<strong>跨持久化边界 round-trip</strong>。累计 7 种 harness 系统。</p>
+    <p style="margin:.2em 0">数据现在有了<strong>有序、不可变、可二分</strong>的磁盘形态。MemTable 满了能倒进 SST。只差读路径把 SST 接回来——一步之遥 MVP。</p>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase D — 读路径合并(触达 M1 MVP).</strong> 把 <code>Engine::get</code> 从"只查 MemTable"升级成查找链:<strong>active MemTable → (immutable) → SST 们,新到旧</strong>,第一个命中即返回。届时本课那个"故意空洞"补上,你的引擎第一次 Put/Get/重启/flush 全闭环——M1 达成。先把上面 4 个核心问题想透,尤其 #1(flush 原子性)和 #3(换新 vs 清空)——它们是 Phase D/L 的设计前提。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/flush_job.cc">flush_job.cc</a>(真实 flush 的 manifest 协调)。</p>
+    <p>想完跟我对答案,或说"开 Phase D"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G2 · minimal scan — 对外范围扫描雏形</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="g1-merge-iterator.html">← G1</a> &nbsp;·&nbsp; <a href="index.html">Phase G</a> &nbsp;·&nbsp; G2</div>
+
+  <div class="kicker">STEP G2 · Phase G 归并</div>
+  <h1>minimal scan — 对外范围扫描雏形</h1>
+  <p>G1 的 <code>MergeIterator</code> 还只认 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code>。G2 把它接上引擎真实的三层源——active memtable、若干 immutable、一摞 SST——切出引擎对外的第一个**范围读 API**:<code>scan(start, end)</code>。这是 LSM "读时归并"第一次以**用户能调的形态**落地。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0"><code>engine.rs</code> 加 <code>scan(&amp;self, start: &amp;[u8], end: &amp;[u8]) -&gt; Vec&lt;(Key, Value)&gt;</code>:把 <code>mem</code> / <code>imm[..]</code> / <code>ssts[..]</code> <strong>按优先级</strong>各做一个 <code>LsmIterator</code>,塞进 <code>MergeIterator</code>,<code>seek(start)</code> 起、收到 <code>key &gt;= end</code> 止(<strong>半开区间 [start, end)</strong>)。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 跨层扫描差分绿——数据散在 active/imm/SST、含覆盖写,<code>engine.scan(a, b)</code> 逐条 == <code>BTreeMap::range(a..b)</code>(取最新值)。</p>
+  </div>
+
+  <h3>源的顺序 = 优先级,必须和 <code>get</code> 一致</h3>
+  <p>归并要靠<strong>源优先级</strong>区分新旧(G1 讲过:plain key 分不出谁新)。所以喂进 <code>MergeIterator</code> 的顺序<strong>必须</strong>是优先级降序,且和 <code>get</code> 的查找顺序<strong>同一个</strong>:</p>
+  <pre>    <span class="c">// get:  mem → imm(新→旧)→ ssts(新→旧),命中即停</span>
+    <span class="c">// scan: 同一个顺序塞进 sources[0..],idx 小 = 优先级高</span>
+    sources = [ mem.iter,  imm[0].iter, imm[1].iter, …,  ssts[0].iter, ssts[1].iter, … ]
+                ↑最高                                                        最低↑</pre>
+  <p><code>get</code> 和 <code>scan</code> 走<strong>两条代码路径</strong>(get 是逐层命中即停、护 Phase R 的 bloom;scan 是归并),但它们对"谁是某个 key 的最新值"<strong>必须给出一致答案</strong>。这条一致性后面用 <code>get(k) ≡ scan(k..=k).first()</code> 差分锁死(Phase H 起)。<strong>同一份优先级约定,喂给两条路径</strong>——顺序写错,两条就会分叉。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li><code>engine.rs</code> 引入 <code>MergeIterator</code> / <code>LsmIterator</code> / <code>Bytes</code>;加 <code>scan</code> 方法(「代码 1」)。</li>
+    <li>按优先级 <code>mem → imm → ssts</code> 收集 <code>sources</code>,<code>MergeIterator::new</code>,<code>seek(start)</code>,循环收到 <code>key &gt;= end</code>(「代码 1」)。</li>
+    <li>敲入「代码 2」跨层扫描差分,<code>cargo test scan</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>engine.scan</code>(engine.rs)</h3>
+  <pre>    <span class="k">use</span> crate::iterator::LsmIterator;
+    <span class="k">use</span> crate::merge::MergeIterator;
+    <span class="k">use</span> bytes::Bytes;
+
+    <span class="k">impl</span> <span class="t">Engine</span> {
+        <span class="c">/// 范围扫描 [start, end)(plain key,半开区间)。新值遮旧值由源优先级去重保证。</span>
+        <span class="k">pub fn</span> <span class="f">scan</span>(&self, start: &[u8], end: &[u8]) -> Vec&lt;(Key, Value)&gt; {
+            <span class="c">// 源顺序 = 优先级降序,与 get 的 mem→imm→ssts 一致</span>
+            <span class="k">let</span> <span class="k">mut</span> sources: Vec&lt;Box&lt;<span class="k">dyn</span> LsmIterator + <span class="k">'_</span>&gt;&gt; = Vec::new();
+            sources.<span class="f">push</span>(Box::<span class="f">new</span>(self.mem.<span class="f">iter_lsm</span>()));
+            <span class="k">for</span> m <span class="k">in</span> &self.imm { sources.<span class="f">push</span>(Box::<span class="f">new</span>(m.<span class="f">iter_lsm</span>())); }
+            <span class="k">for</span> r <span class="k">in</span> &self.ssts { sources.<span class="f">push</span>(Box::<span class="f">new</span>(r.<span class="f">iter</span>())); }
+
+            <span class="k">let</span> <span class="k">mut</span> it = MergeIterator::<span class="f">new</span>(sources);
+            it.<span class="f">seek</span>(start);
+            <span class="k">let</span> <span class="k">mut</span> out = Vec::new();
+            <span class="k">while</span> it.<span class="f">valid</span>() && it.<span class="f">key</span>() &lt; end {       <span class="c">// 半开:&gt;= end 即停</span>
+                out.<span class="f">push</span>((Bytes::<span class="f">copy_from_slice</span>(it.<span class="f">key</span>()),
+                           Bytes::<span class="f">copy_from_slice</span>(it.<span class="f">value</span>())));
+                it.<span class="f">next</span>();
+            }
+            out
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>生命周期在这兑现。</strong> <code>sources</code> 里每个 iter 都借 <code>&amp;self</code>(<code>mem</code>/<code>imm</code>/<code>ssts</code>):<code>MemTableIter&lt;'_&gt;</code> 借跳表(F3 那个 <code>'a</code>)、<code>SstIter&lt;'_&gt;</code> 借 reader。<code>MergeIterator&lt;'_&gt;</code> 把这些 <code>'_</code> 统一成 <code>&amp;self</code> 的生命周期。最后 <strong><code>copy_from_slice</code> 把结果拷成 owned <code>Bytes</code></strong>——这样返回的 <code>Vec</code> 不再借 <code>self</code>,函数能干净返回。<code>Bytes::copy_from_slice</code> 这里是真拷(出借用边界),不是引用计数。</p>
+
+  <div class="warnbox"><strong>为什么先 <code>collect</code> 成 <code>Vec</code>,而不返回一个 <code>scan</code> 迭代器?</strong> 返回 <code>impl LsmIterator + '_</code> 也行、还更惰性,但它会**借住 <code>&amp;self</code> 整段扫描期间**——调用方拿着这个迭代器时不能再 <code>&amp;mut self</code>(put/flush)。G2 选 <code>Vec</code>(物化、立刻释放借用)是 MVP 取舍:简单、够用、避开生命周期外溢。<strong>Phase K</strong> 做对外 <code>scan</code> 迭代器(seek/next 流式、快照+墓碑感知)时再正面处理这个借用 / 快照 pin 问题。</p>
+
+  <h2>🧰 Coding style:按优先级建源 · 物化释放借用 · 半开区间</h2>
+  <ul>
+    <li><strong>源按优先级建,和 get 同序</strong>:把"谁更新"的约定<strong>只写一处</strong>(mem→imm→ssts)、两条读路径共用。约定散成两份迟早分叉;集中成一个顺序,改一处全改。</li>
+    <li><strong>物化释放借用</strong>:<code>copy_from_slice</code> 把借 <code>self</code> 的切片拷成 owned,返回值与 <code>self</code> 脱钩。"<strong>出借用边界就拷贝</strong>"是 Rust 把内部借用挡在 API 边界内的常规手法(对照 F2 SstIter 内部零拷贝、点查边界才 copy)。</li>
+    <li><strong>半开区间 [start, end)</strong>:<code>key() &lt; end</code> 停。半开是范围 API 的事实标准(<code>BTreeMap::range</code>、<code>std::ops::Range</code>、SQL 之外几乎都是)——拼接区间不重不漏(<code>[a,b) + [b,c) = [a,c)</code>),空区间 <code>[x,x)</code> 自然为空。</li>
+  </ul>
+
+  <h2>🧠 System mindset:scan = 读时归并的对外面孔</h2>
+  <p>到这一步,LSM 的读路径骨架齐了:<strong>点查</strong>(<code>get</code>,逐层命中即停)和<strong>范围读</strong>(<code>scan</code>,归并所有层)。两者都建在"数据分层散落、读时合一"之上。<code>scan</code> 就是 RocksDB <code>DBIter</code> 的雏形——一个跨整个 LSM、对用户呈现"一张有序逻辑表"的游标。它把底下 active/imm/L0/L1… 几十个物理片段的复杂度,<strong>收敛成一条干净的有序流</strong>。</p>
+  <p><strong>迁移收获</strong>:任何"底层分片 + 对外统一视图"的系统都有这层。难点不在归并本身,在<strong>边界语义</strong>:① 区间开闭(半开);② 快照隔离(扫描期间并发写可见吗?——Phase J/K);③ 删除(被删的 key 怎么从扫描结果里消失?——墓碑,Phase H3/K)。G2 把<strong>骨架</strong>立起来,这三件语义留给后续逐个补——<strong>先正确地"扫出存在的东西",再正确地"扫出该看见的版本"</strong>。</p>
+
+  <h2>🧪 Harness 系统:跨层扫描差分 vs BTreeMap::range</h2>
+  <div class="harness">
+    <div class="kicker">把数据故意摊到三层</div>
+    <p style="margin:.3em 0 0">G1 用 VecIter 在内存里验归并逻辑;G2 要验<strong>引擎真把三层源接对了</strong>。手法:写一批 → <code>flush</code>(进 SST)→ 覆盖偶数 key → <code>freeze</code>(进 imm)→ 再写一批留 active。于是同一个 key 的新旧版本<strong>跨层分布</strong>,只有"源优先级 + 归并"都对,<code>scan</code> 才能逐条等于 <code>BTreeMap::range</code>。多个区间(头/中/尾/全量)各打一遍,抓:漏层、层序反、区间边界错(把 end 也吐了)。这条差分到 Phase K 升级成"<strong>快照 + 墓碑感知</strong>"的扫描差分。</p>
+  </div>
+
+  <h3>代码 2 — 跨层扫描差分(engine.rs tests)</h3>
+  <pre>    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">scan_matches_btreemap_range</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> model: BTreeMap&lt;Vec&lt;u8&gt;, Vec&lt;u8&gt;&gt; = BTreeMap::<span class="f">new</span>();
+
+        <span class="k">for</span> i <span class="k">in</span> 0..40u32 {                          <span class="c">// 一批 → flush 进 SST</span>
+            <span class="k">let</span> (k, v) = (format!(<span class="s">"k{i:03}"</span>), format!(<span class="s">"old{i}"</span>));
+            e.<span class="f">put</span>(k.<span class="f">clone</span>().<span class="f">into</span>(), v.<span class="f">clone</span>().<span class="f">into</span>()).<span class="f">unwrap</span>();
+            model.<span class="f">insert</span>(k.<span class="f">into_bytes</span>(), v.<span class="f">into_bytes</span>());
+        }
+        e.<span class="f">flush</span>().<span class="f">unwrap</span>();
+        <span class="k">for</span> i <span class="k">in</span> (0..40u32).<span class="f">step_by</span>(2) {               <span class="c">// 覆盖偶数 key → freeze 进 imm</span>
+            <span class="k">let</span> (k, v) = (format!(<span class="s">"k{i:03}"</span>), format!(<span class="s">"new{i}"</span>));
+            e.<span class="f">put</span>(k.<span class="f">clone</span>().<span class="f">into</span>(), v.<span class="f">clone</span>().<span class="f">into</span>()).<span class="f">unwrap</span>();
+            model.<span class="f">insert</span>(k.<span class="f">into_bytes</span>(), v.<span class="f">into_bytes</span>());
+        }
+        e.<span class="f">freeze</span>();
+        <span class="k">for</span> i <span class="k">in</span> 50..60u32 {                         <span class="c">// active 独有</span>
+            <span class="k">let</span> (k, v) = (format!(<span class="s">"k{i:03}"</span>), format!(<span class="s">"act{i}"</span>));
+            e.<span class="f">put</span>(k.<span class="f">clone</span>().<span class="f">into</span>(), v.<span class="f">clone</span>().<span class="f">into</span>()).<span class="f">unwrap</span>();
+            model.<span class="f">insert</span>(k.<span class="f">into_bytes</span>(), v.<span class="f">into_bytes</span>());
+        }
+
+        <span class="k">for</span> (a, b) <span class="k">in</span> [(&b<span class="s">"k000"</span>[..], &b<span class="s">"k010"</span>[..]), (&b<span class="s">"k005"</span>[..], &b<span class="s">"k055"</span>[..]),
+                       (&b<span class="s">"k038"</span>[..], &b<span class="s">"k052"</span>[..]), (&b<span class="s">""</span>[..], &b<span class="s">"\xff"</span>[..])] {
+            <span class="k">let</span> got = e.<span class="f">scan</span>(a, b);
+            <span class="k">let</span> want: Vec&lt;(Bytes, Bytes)&gt; = model.<span class="f">range</span>(a.<span class="f">to_vec</span>()..b.<span class="f">to_vec</span>())
+                .<span class="f">map</span>(|(k, v)| (Bytes::<span class="f">copy_from_slice</span>(k), Bytes::<span class="f">copy_from_slice</span>(v))).<span class="f">collect</span>();
+            <span class="f">assert_eq!</span>(got, want, <span class="s">"scan 与 BTreeMap::range 分叉"</span>);
+        }
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test scan_matches</div>
+  <div class="done"><div class="kicker">G2 判定 — 全绿 · Phase G 收官</div><p style="margin:.3em 0 0"><code>engine::tests::scan_matches_btreemap_range ... ok</code><br>(G1 merge 五测 + F/E/D 全部回归)<br><strong>36 passed; 0 failed</strong></p></div>
+
+  <div class="milestone">🏁 <strong>Phase G 达成:读时归并落地为对外 <code>scan</code></strong>。引擎现在能点查(get)也能范围扫(scan),两条读路径共享同一套源优先级。但 <code>scan</code> 还<strong>不认删除、不认快照</strong>:删掉的 key 仍会被扫出来(还没有墓碑)、扫描看到的是"当下"而非"某个快照"。这正是 <strong>Phase H(InternalKey + seq + 墓碑)</strong> 和 <strong>J/K(快照 + 墓碑感知 scan)</strong> 要补的。</p></div>
+
+  <h2>🔄 CI/CD:scan 差分升 integration 档</h2>
+  <p>G2 的 scan 测试要写临时 SST、flush(碰盘 <code>sync_all</code>)→ 进 <code>integration</code> 慢档。它和 D 的 <code>layered_lookup_differential</code>(get 跨层对拍)是<strong>一对</strong>:一个验点查、一个验范围,两条读路径各一条引擎级差分。Phase H 起会再加 <code>get(k) ≡ scan(k..=k).first()</code> 把两条路径<strong>互锁</strong>——任一路径改坏,差分立刻红。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">G2 / Phase G 收尾</div>
+    <ol>
+      <li><strong>为什么 scan 物化成 Vec、get 却能逐层命中即停?</strong>(get 找<strong>一个</strong> key,逐层问、命中即返回,大多数情况只碰最上层 → 快、且能用 bloom 跳过整层(Phase R)。scan 要<strong>一个范围的全部</strong>,绕不开把每层都开游标归并。<strong>点查和范围读的最优策略天生不同</strong>,所以 RocksDB 也保留两条路径,而非让 get 走 scan。)</li>
+      <li><strong>源顺序写反会怎样?</strong>(若把 ssts 排在 mem 前面,同 key 的旧 SST 值优先级变高 → scan 吐旧值。和 get 的 mem→imm→ssts 一比就分叉。<strong>源优先级是个必须两路一致的全局约定</strong>,这也是为什么把它收敛成一处。)</li>
+      <li><strong>删除的 key 现在会被 scan 扫出来吗?</strong>(会!现在<strong>没有删除</strong>——没墓碑、没 delete API。要让"删过的 key 在 scan 里消失",得 Phase H3 引入 <code>kTypeDeletion</code> 墓碑:删 = 写一条墓碑,归并时墓碑遮蔽同 key 旧值、且自己不吐。想清楚:删除在 LSM 里也是一次<strong>写</strong>,不是原地抹除。)</li>
+      <li><strong>扫描期间并发 put,scan 看得到吗?</strong>(G2 是单线程同步引擎,scan 跑完才返回,问题不显。但语义上:<code>MemTableIter</code> 是活游标(F3),会看到扫描中途的写 → 弱一致。真正要"扫一个一致快照"得 Phase J 的 snapshot seq——按 seq 过滤,只看 ≤ 快照号的版本。G2 先不管,K 补齐。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase H — InternalKey(user_key + seq + type).</strong> 给每个 key 编上<strong>序列号 seq</strong> 和<strong>类型 type</strong>(Put/Delete)。seq 让"新旧"从"靠源顺序猜"变成"key 自带、比较器可读";type 让"删除"成为一种可归并的写(墓碑)。H3 会<strong>重写 <code>MergeIterator</code> 的比较器</strong>(plain <code>[u8]::cmp</code> → <code>InternalKeyComparator</code>)——本课刻意把比较规则外置,就是为这次重写铺路。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/db_iter.cc">db_iter.cc</a>(对外 DBIter,K 升级目标)· <a href="https://github.com/facebook/rocksdb/blob/main/db/dbformat.h">dbformat.h</a>(下一站 H 的 InternalKey)。</p>
+    <p>想完跟我对答案,或说"继续 Phase H"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

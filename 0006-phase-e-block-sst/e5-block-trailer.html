@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E5 · 块尾:CRC + 压缩(lz4)</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .win{color:var(--good);font-weight:bold}.lose{color:var(--accent);font-weight:bold}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="e4-restart-prefix.html">← E4</a> &nbsp;·&nbsp; <a href="index.html">Phase E</a> &nbsp;·&nbsp; E5</div>
+
+  <div class="kicker">STEP E5 · Phase E block-based SST</div>
+  <h1>块尾:per-block CRC + 压缩(lz4)</h1>
+  <p>E4 的前缀压缩吃 key 的<strong>结构相似性</strong>,对 value 里的<strong>统计冗余</strong>无能为力。E5 给每块加 RocksDB 式<strong>块尾</strong> <code>[type:1][crc32:4]</code>:<code>type</code> 记压缩算法,<code>crc</code> 在读时校验完整性;用 <code>lz4_flex</code> 把<strong>整个数据块</strong>压一遍。磁盘赢面在此<strong>叠满</strong>;代价是读路径每块多付<strong>解压 + 校验</strong>的 CPU——回 E3 把这笔账量化出来。这是 Phase E 的收官:SST 终于长出真 RocksDB 的<strong>块尾</strong>(BlockTrailer)与<strong>可校验、可压缩</strong>的骨相。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">在 <code>sst.rs</code> 加两个函数:<code>seal_block(raw, compress) -&gt; Vec&lt;u8&gt;</code>(压缩 → 加 <code>type</code> → 加 <code>crc32</code>)与 <code>unseal_block(disk) -&gt; Result&lt;Bytes&gt;</code>(校验 crc → 解压)。<code>flush_block</code> / 索引落盘走 <code>seal</code>,<code>read_block</code> / 索引载入走 <code>unseal</code>。<code>BlockHandle.len</code> 改为<strong>磁盘上整块长度(含 trailer)</strong>。加 <code>set_compress</code> 开关。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> <code>seal_unseal_roundtrip</code>(可压数据 lz4 更小、还原一致)绿;<code>crc_catches_corruption</code>(翻转盘上一字节 → 读该块报错、<strong>不返回错值</strong>)绿;引擎 + 既有 SST 测试全过;回 E3 重跑,<strong>磁盘断崖式下降</strong>、<strong>热点查变慢</strong>(诚实记下解压成本)。</p>
+  </div>
+
+  <h3>磁盘上的一个块:payload + 块尾(格式锚)</h3>
+  <svg viewBox="0 0 700 150" font-family="ui-monospace,monospace" font-size="11">
+    <rect x="20" y="30" width="360" height="40" fill="#e8f0e0" stroke="#7a9a5a"/><text x="200" y="55" text-anchor="middle" fill="#3a5a2a">payload(可能被 lz4 压缩的块字节)</text>
+    <rect x="382" y="30" width="70" height="40" fill="#eef3f6" stroke="#7fb0c9"/><text x="417" y="55" text-anchor="middle" fill="#2e5d7a">type:1</text>
+    <rect x="454" y="30" width="110" height="40" fill="#fcf3ee" stroke="#c98a6a"/><text x="509" y="55" text-anchor="middle" fill="#7a3b2e">crc32:4</text>
+    <text x="20" y="95" fill="#888">type:0=none 1=lz4 &nbsp;·&nbsp; crc 覆盖 [payload + type] &nbsp;·&nbsp; BlockHandle.len = 整块(payload+5)</text>
+    <text x="20" y="116" fill="#3a6b3a">写:seal = compress? lz4 : raw → push type → push crc32(payload+type)</text>
+    <text x="20" y="134" fill="#2e5d7a">读:unseal = 先验 crc(损坏即报错)→ 按 type 解压 → 得原始块 → Block::decode</text>
+  </svg>
+  <p><strong>为什么 crc 先验、再解压?</strong> 顺序是<strong>安全要点</strong>。若先解压再校验,一段<strong>损坏的压缩数据</strong>可能让解压器读出天量长度、疯狂分配、甚至 panic——你在<strong>未验真</strong>的字节上跑了复杂逻辑。先 crc 校验,等于"<strong>验真之后才信任</strong>":crc 不符立即拒绝,解压器永远只见到完好数据。这跟"先验签名再解析报文""先校验长度再 memcpy"是同一条铁律——<strong>不可信输入,先校验,后处理</strong>。</p>
+  <span class="src">table/format.h:BlockTrailerSize=5(1 type + 4 crc)· table/block_based/block_based_table_builder.cc:WriteRawBlock(compress → trailer)· block_fetcher.cc:VerifyChecksum 先于解压</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li><code>Cargo.toml</code> 加 <code>lz4_flex = "0.11"</code>(纯 Rust,无 C 工具链)。<code>crc32fast</code> 早在依赖里、终于用上。</li>
+    <li><code>sst.rs</code> 加 <code>seal_block</code> / <code>unseal_block</code> 两个自由函数(「代码 1」),以及压缩 type 常量 + <code>TRAILER_LEN=5</code>。</li>
+    <li><code>SstBuilder</code> 加 <code>compress: bool</code> 字段(默认 true)+ <code>set_compress</code>;<code>flush_block</code> 与索引落盘改走 <code>seal_block</code>,<code>handle.len</code> = sealed 长度(「代码 2」)。</li>
+    <li><code>SstReader</code> 的 <code>read_block</code> 与 <code>open</code> 载索引改走 <code>unseal_block</code>(「代码 3」)。</li>
+    <li>敲入「代码 4」harness(round-trip + CRC 故障注入),<code>cargo test</code> 全绿;<code>cargo run --release --bin bench</code> 看磁盘断崖 + 热读变慢。</li>
+  </ol>
+
+  <h3>代码 1 — <code>seal_block</code> / <code>unseal_block</code></h3>
+  <pre><span class="k">use</span> anyhow::{anyhow, bail};
+
+<span class="k">const</span> COMP_NONE: u8 = 0;
+<span class="k">const</span> COMP_LZ4: u8 = 1;
+<span class="k">const</span> TRAILER_LEN: usize = 5; <span class="c">// type(1) + crc32(4)</span>
+
+<span class="c">/// 原始块 → 磁盘形态:可选压缩 → 加 type → 加 crc32(覆盖 payload+type)。</span>
+<span class="k">fn</span> <span class="f">seal_block</span>(raw: &[u8], compress: bool) -> Vec&lt;u8&gt; {
+    <span class="k">let</span> (<span class="k">mut</span> out, ctype) = <span class="k">if</span> compress {
+        (lz4_flex::<span class="f">compress_prepend_size</span>(raw), COMP_LZ4) <span class="c">// 前 4B 记原始长度,解压据此还原</span>
+    } <span class="k">else</span> { (raw.<span class="f">to_vec</span>(), COMP_NONE) };
+    out.<span class="f">push</span>(ctype);
+    <span class="k">let</span> <span class="k">mut</span> h = crc32fast::Hasher::<span class="f">new</span>();
+    h.<span class="f">update</span>(&out); <span class="c">// crc 覆盖 payload + type</span>
+    out.<span class="f">extend_from_slice</span>(&h.<span class="f">finalize</span>().<span class="f">to_le_bytes</span>());
+    out
+}
+
+<span class="c">/// 磁盘形态 → 原始块:先验 crc(损坏即报错)→ 按 type 解压。</span>
+<span class="k">fn</span> <span class="f">unseal_block</span>(disk: &[u8]) -> Result&lt;Bytes&gt; {
+    <span class="k">if</span> disk.<span class="f">len</span>() &lt; TRAILER_LEN { <span class="f">bail!</span>(<span class="s">"block 太小,无 trailer"</span>); }
+    <span class="k">let</span> body = &disk[..disk.<span class="f">len</span>() - 4];            <span class="c">// payload + type</span>
+    <span class="k">let</span> crc_stored = u32::<span class="f">from_le_bytes</span>(disk[disk.<span class="f">len</span>()-4..].<span class="f">try_into</span>()?);
+    <span class="k">let</span> <span class="k">mut</span> h = crc32fast::Hasher::<span class="f">new</span>(); h.<span class="f">update</span>(body);
+    <span class="k">if</span> h.<span class="f">finalize</span>() != crc_stored { <span class="f">bail!</span>(<span class="s">"block crc 不符:数据损坏"</span>); } <span class="c">// 先验真</span>
+    <span class="k">let</span> ctype = body[body.<span class="f">len</span>()-1];
+    <span class="k">let</span> payload = &body[..body.<span class="f">len</span>()-1];
+    <span class="k">let</span> raw = <span class="k">match</span> ctype {                       <span class="c">// 后处理</span>
+        COMP_NONE => payload.<span class="f">to_vec</span>(),
+        COMP_LZ4  => lz4_flex::<span class="f">decompress_size_prepended</span>(payload).<span class="f">map_err</span>(|e| <span class="f">anyhow!</span>(<span class="s">"lz4: {e}"</span>))?,
+        other     => <span class="f">bail!</span>(<span class="s">"未知压缩 type: {other}"</span>),
+    };
+    Ok(Bytes::<span class="f">from</span>(raw))
+}</pre>
+
+  <h3>代码 2 — 写路径:<code>flush_block</code> + 索引落盘 seal</h3>
+  <pre>    <span class="k">fn</span> <span class="f">flush_block</span>(&<span class="k">mut</span> self) {
+        <span class="k">if</span> self.block.<span class="f">is_empty</span>() { <span class="k">return</span>; }
+        <span class="k">let</span> block = std::mem::<span class="f">take</span>(&<span class="k">mut</span> self.block).<span class="f">finish</span>();
+        <span class="k">let</span> sealed = <span class="f">seal_block</span>(&block, self.compress);  <span class="c">// 压缩 + type + crc</span>
+        <span class="k">let</span> offset = self.data.<span class="f">len</span>() <span class="k">as</span> u64;
+        <span class="k">let</span> len = sealed.<span class="f">len</span>() <span class="k">as</span> u64;             <span class="c">// handle.len = 磁盘整块(含 trailer)</span>
+        self.data.<span class="f">extend_from_slice</span>(&sealed);
+        <span class="k">let</span> last = self.last_key.<span class="f">clone</span>().<span class="f">unwrap</span>();
+        self.index.<span class="f">push</span>((last, BlockHandle { offset, len }));
+    }
+    <span class="c">// finish 里索引块也 seal:</span>
+    <span class="k">let</span> sealed_index = <span class="f">seal_block</span>(&index_block, self.compress);
+    f.<span class="f">write_all</span>(&sealed_index)?;
+    <span class="c">// footer 存 sealed_index.len() 作为 index_len</span></pre>
+
+  <h3>代码 3 — 读路径:<code>read_block</code> + 索引载入 unseal</h3>
+  <pre>    <span class="k">fn</span> <span class="f">read_block</span>(&self, h: BlockHandle) -> Result&lt;Block&gt; {
+        <span class="k">let</span> <span class="k">mut</span> buf = <span class="f">vec!</span>[0u8; h.len <span class="k">as</span> usize];
+        self.file.<span class="f">read_exact_at</span>(&<span class="k">mut</span> buf, h.offset)?;
+        self.blocks_read.<span class="f">fetch_add</span>(1, Ordering::Relaxed);
+        self.bytes_read.<span class="f">fetch_add</span>(h.len, Ordering::Relaxed);
+        Ok(Block::<span class="f">decode</span>(<span class="f">unseal_block</span>(&buf)?))  <span class="c">// 校验 crc + 解压 → 解块</span>
+    }
+    <span class="c">// open 里索引载入:</span>
+    <span class="k">let</span> index_block = Block::<span class="f">decode</span>(<span class="f">unseal_block</span>(&ibuf)?);</pre>
+  <div class="warnbox"><strong>读路径对损坏的反应是"降级为 miss",不是崩。</strong> <code>get</code> 里 <code>read_block(*handle).ok()?</code> —— <code>unseal</code> 报错(crc 不符)被 <code>.ok()?</code> 转成 <code>None</code>。所以一个损坏块的效果是"这个 key 读不到",而<strong>不是返回错值、也不是 panic 整个进程</strong>。真 RocksDB 会把 corruption 作为 <code>Status::Corruption</code> 上抛由上层决定(重试别的副本 / 报警),但"<strong>宁可没有,不可错有</strong>"的原则一致——校验的全部意义就是<strong>不让错数据冒充对数据</strong>。</div>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo run --release --bin bench</div>
+
+  <h2>实测:磁盘断崖,读 CPU 上账</h2>
+  <p>同一份 1M×116B 数据,data block 开 lz4,再跑 E3 基准:</p>
+  <table>
+    <thead><tr><th>指标</th><th>E4(前缀压缩,无块压缩)</th><th>E5(+lz4 块压缩)</th><th>读这一行</th></tr></thead>
+    <tbody>
+      <tr><td>file size on disk</td><td>116.1 MB</td><td class="win">56.9 MB</td><td>对有冗余的 value,块压缩再<strong>砍一半</strong></td></tr>
+      <tr><td>vs flat(152MB)</td><td>−24%</td><td class="win">−63%</td><td>索引瘦身 + 前缀压缩 + lz4 <strong>三层叠加</strong></td></tr>
+      <tr><td>readrandom 热</td><td>~1440 ns/op</td><td class="lose">~2867 ns/op</td><td>每次 get <strong>多付一次 lz4 解压</strong>(无 cache → 每块都解)</td></tr>
+      <tr><td>冷读 Q=1000 字节</td><td>4.1 MB</td><td class="win">2.0 MB</td><td>块更小 → 冷读搬的字节也更少</td></tr>
+      <tr><td>冷读 Q=100k 总时</td><td>174 ms</td><td class="lose">294 ms</td><td>重复读同块时,<strong>解压 CPU</strong> 盖过省下的 IO</td></tr>
+    </tbody>
+  </table>
+  <p><strong>压缩是一笔账,不是免费午餐。</strong>磁盘从 152MB 砍到 56.9MB(−63%),但热点查从 1440ns 涨到 2867ns——每次 <code>get</code> 都要 lz4 解一整块。冷读小 Q 仍赢(搬的字节更少),但大 Q(重复读同块)<strong>解压 CPU 反客为主</strong>,294ms &gt; E4 的 174ms。这条账精确地指向 <strong>Phase S block cache</strong>:把<strong>解压后</strong>的块缓存在用户态,热块只解一次,压缩的磁盘收益就能<strong>白拿</strong>、读 CPU 的代价<strong>只付一次</strong>。压缩 + 缓存是天生一对。</p>
+  <p style="font-size:.9em;color:var(--soft)">注:压缩率取决于 value 内容。我们的基准 value 有周期性冗余,lz4 砍得狠;若 value 是随机散列/已压缩的图片,lz4 几乎无效甚至略增(那时 <code>set_compress(false)</code> 更划算——RocksDB 也支持 per-level 关压缩)。诚实地说:−63% 是<strong>这份数据</strong>的数字,不是普适承诺。</p>
+
+  <h2>🧰 Coding style:自由函数封装格式 · 先验后用 · 类型字节做版本位</h2>
+  <ul>
+    <li><strong>seal/unseal 自由函数,不绑进类型</strong>:块尾是<strong>纯字节变换</strong>(<code>&amp;[u8] → Vec&lt;u8&gt;</code>),不依赖 <code>SstBuilder</code> 的任何状态,就该是<strong>无副作用的自由函数</strong>——好测(直接喂字节)、好复用(data 块、index 块、将来 WAL 都能用)。"<strong>能是纯函数就别做成方法</strong>"。</li>
+    <li><strong>先验真后处理(validate-before-use)</strong>:crc 校验<em>必须</em>在解压<em>之前</em>。把"信任边界"画在校验那一行:之前的字节都<strong>不可信</strong>,之后才可信。所有解析不可信输入的代码(网络协议、文件格式、反序列化)都该有这条显式边界。</li>
+    <li><strong>type 字节 = 前向兼容的版本位</strong>:一个字节区分 none/lz4,未来加 zstd 只需 <code>COMP_ZSTD=2</code> + 一个 match 分支,<strong>旧文件照读</strong>(type=0/1 不变)。"<strong>在格式里留一个算法标识位</strong>"是可演进格式的标配(TLS cipher suite、HTTP Content-Encoding、容器镜像的 media type 全是这招)。</li>
+  </ul>
+
+  <h2>🧠 System mindset:完整性 · 压缩三角 · 信任边界</h2>
+  <table>
+    <thead><tr><th>概念</th><th>本阶段怎么体现 / 跨域同构</th></tr></thead>
+    <tbody>
+      <tr><td><strong>端到端完整性</strong></td><td>磁盘会<strong>静默腐坏</strong>(bit rot、固件 bug、坏道)。per-block crc 在<strong>使用点</strong>校验,而非信任硬件。同构:ZFS/Btrfs 块校验、TCP checksum、Ceph scrub、Git object SHA。<strong>"数据离开你视线就可能变,回来时要验"</strong>。</td></tr>
+      <tr><td><strong>压缩三角</strong></td><td>压缩把<strong>空间</strong>换成<strong>CPU</strong>(还可能换<strong>读延迟</strong>)。lz4 选"快但压缩率中等",zstd 选"慢但更小",none 选"不压但最快"。这是 LSM 读/写/空间放大三角在<strong>块层</strong>的投影。算法选择 = 在你的瓶颈维度上让步最少的那个。</td></tr>
+      <tr><td><strong>信任边界</strong></td><td>crc 那一行是代码里的<strong>信任分割线</strong>。之前=不可信外部字节,之后=可信内部数据。把边界画清楚,后续逻辑(解压、解码)就能<strong>假设输入良性</strong>而不必处处设防。安全工程的"<strong>parse, don't validate</strong>"同源。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:任何"落盘 / 过网 / 跨进程"的字节,默认<strong>会坏、值得压</strong>。一个 <code>[payload][type][checksum]</code> 的信封,把"<strong>压缩(省)+ 类型(可演进)+ 校验(可信)</strong>"三件事钉在一个最小单位上——这个信封结构你会在无数协议和格式里再遇到。</p>
+
+  <h2>🧪 Harness 系统:故障注入(fault injection)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">校验代码有个尴尬:<strong>不主动破坏数据,它永远不触发</strong>——测试全绿可能只是因为没东西坏过。所以 CRC 这类防御代码必须配<strong>故障注入</strong>:<code>crc_catches_corruption</code> 主动<strong>翻转盘上一个字节</strong>,断言"读该块<strong>报错</strong>(返回 <code>None</code>),而非返回错值"。这是在<strong>测失败路径</strong>,而非成功路径。同源 harness:WAL 的尾部截断测试(B 阶段你做过)、网络的丢包/乱序注入、<code>kill -9</code> 崩溃恢复测试。<strong>"防御性代码的测试,必须主动制造它要防的那个灾难"</strong>——否则你只是部署了一个<strong>从未演练过的灭火器</strong>。再加 <code>seal_unseal_roundtrip</code> 守正向(可压数据 lz4 确实更小、还原一致),一正一反两面包夹。</p>
+  </div>
+
+  <h3>代码 4 — harness(<code>sst.rs</code> tests)</h3>
+  <pre>    <span class="c">// 正向:seal→unseal 还原一致;可压数据 lz4 更小。</span>
+    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">seal_unseal_roundtrip</span>() {
+        <span class="k">let</span> raw = b<span class="s">"the quick brown fox the quick brown fox the quick brown fox"</span>;
+        <span class="k">let</span> lz4 = <span class="f">seal_block</span>(raw, <span class="k">true</span>);
+        <span class="f">assert!</span>(lz4.<span class="f">len</span>() &lt; <span class="f">seal_block</span>(raw, <span class="k">false</span>).<span class="f">len</span>());
+        <span class="f">assert_eq!</span>(<span class="f">unseal_block</span>(&lz4).<span class="f">unwrap</span>().<span class="f">as_ref</span>(), raw);
+    }
+
+    <span class="c">// 反向(故障注入):翻转盘上一字节 → 读该块必须报错,不返回错值。</span>
+    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">crc_catches_corruption</span>() {
+        <span class="c">// …build SST(block_size=64,多块)…</span>
+        <span class="k">let</span> <span class="k">mut</span> f = OpenOptions::<span class="f">new</span>().<span class="f">read</span>(<span class="k">true</span>).<span class="f">write</span>(<span class="k">true</span>).<span class="f">open</span>(&path)?;
+        <span class="c">// 翻转第 8 字节(落在第一个 data block 的 payload 内)</span>
+        <span class="k">let</span> <span class="k">mut</span> one = [0u8; 1]; f.<span class="f">read_exact_at</span>(&<span class="k">mut</span> one, 8)?;
+        one[0] ^= 0xFF; f.<span class="f">write_all_at</span>(&one, 8)?; f.<span class="f">sync_all</span>()?;
+
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path)?;       <span class="c">// 索引未损,open 成功</span>
+        <span class="f">assert!</span>(r.<span class="f">get</span>(b<span class="s">"k000"</span>).<span class="f">is_none</span>(),       <span class="c">// 损坏块 → None,绝不返回错值</span>
+            <span class="s">"损坏块不得返回(错)值"</span>);
+    }</pre>
+
+  <div class="done"><div class="kicker">E5 判定 — 全绿</div><p style="margin:.3em 0 0"><code>sst::tests::seal_unseal_roundtrip ... ok</code><br><code>sst::tests::crc_catches_corruption ... ok</code><br><code>sst::tests::*</code>(读放大 / 边界 / 差分)+ <code>engine::tests::*</code> 全部回归<br><strong>20 passed; 0 failed</strong> · bench 磁盘 <strong>56.9MB(−63% vs flat)</strong>,热读 ~2867ns(诚实记下解压成本)</p></div>
+
+  <h2>🔄 CI/CD:压缩开关矩阵 + 完整性 job</h2>
+  <p>E5 给 CI 加两样:① <code>compress ∈ {false, true}</code> 矩阵——证明开关两态都正确,且 <code>false</code> 档当 oracle 对照 <code>true</code> 档(同 E4 的"退化档对照"思路);② 一个专门的<strong>故障注入 job</strong>,把 <code>crc_catches_corruption</code> 这类"主动破坏 + 断言报错"的测试单列,确保防御路径<strong>每次 CI 都演练</strong>。性能回归门仍留到 Phase R——但 E5 已经让 bench 输出了<strong>压缩率</strong>这个新指标,R 接 <code>storage-benchmark-lab</code> 时它会成为被守护的数字之一。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">E5 想透这几个</div>
+    <ol>
+      <li><strong>压缩为何让热点查更慢、却该保留?</strong> readrandom 从 1440 涨到 2867ns。既然变慢,为什么生产 LSM 默认开压缩?(提示:磁盘 / SSD 寿命 / IO 带宽 / 内存里能缓存的<strong>有效数据量</strong>都翻倍。热读的解压成本会被 <strong>block cache</strong> 几乎抹平(热块只解一次)。算总账:<strong>省一半空间 + 缓存命中后无解压</strong> 远胜"每次纯内存偏移"。)</li>
+      <li><strong>crc 放块尾还是块头?</strong> 我们放<strong>尾</strong>(payload 之后)。放头(payload 之前)行不行?(提示:写是<strong>流式</strong>的——payload 多长、crc 是多少,要等 payload 写完才知道。crc 依赖<strong>全部 payload</strong>,只能<strong>事后</strong>追加。这跟块的 offsets 数组、SST footer 同理:<strong>依赖全文的元数据只能放尾</strong>。)</li>
+      <li><strong>先验 crc 再解压,顺序能反吗?</strong> 若先解压再验 crc 会怎样?(提示:损坏的压缩流喂给解压器 = 在<strong>未验真</strong>的字节上跑复杂逻辑,可能 OOM / panic / 读出垃圾长度。<strong>校验是信任边界,必须在任何"理解"数据的动作之前</strong>。)</li>
+      <li><strong>压缩与前缀压缩重复吗?</strong> E4 已前缀压缩,E5 又 lz4。是不是白压两遍?(提示:不。前缀压缩吃 <strong>key 的结构</strong>(排序相邻相似),lz4 吃 <strong>整块的统计冗余</strong>(含 value)。两者<strong>正交</strong>:前缀压缩先把 key 缩小,lz4 再把"缩小后的块"整体压。对随机 key + 文本 value,前者无效后者有效;对相似 key + 随机 value,反之。<strong>留两个都开,各吃各的冗余</strong>。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p>🏁 <strong>Phase E 收官.</strong> 从 E1 的块,到 E2 的稀疏索引,到 E3 的<strong>诚实基准</strong>暴露两处洞(热点慢、热块重复读),到 E4 前缀压缩让数据区缩水,到 E5 块尾压缩 + 完整性。SST 终于长出真 RocksDB 的骨相:<strong>分块、稀疏索引、前缀压缩、块尾 CRC、可选块压缩</strong>。磁盘 −63%、索引内存 27×、读放大 O(一块)——而每一项都有 bench 数字背书,每一处代价都被诚实记下。</p>
+    <p><strong>下一步.</strong> <a href="../0007-phase-f-iterator/index.html">Phase F — StorageIterator</a>:给 <code>Block</code> 和 <code>SstReader</code> 加迭代器,兑现 E1 埋下的零拷贝(<code>value() -&gt; &amp;[u8]</code> 借入迭代器所持块),并解锁 <code>readseq</code> / <code>seekrandom</code> 基准——块化 SST 真正的强项(顺序扫 + 解压一次扫一块)在那里才完全展开。E3 基准里被推迟的那两列负载,Phase F 见。再往后 <strong>Phase S(block cache)</strong> 把 E3/E5 反复点名的"热块重复读 + 重复解压"一次性解决。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/format.h">format.h</a>(<code>BlockTrailerSize</code> · <code>ChecksumType</code>)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_based_table_builder.cc">block_based_table_builder.cc</a>(<code>WriteRawBlock</code> 压缩+trailer)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_fetcher.cc">block_fetcher.cc</a>(读时<code>VerifyChecksum</code> 先于解压)。</p>
+    <p>想完跟我对答案,或说"继续 Phase F / Phase S"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

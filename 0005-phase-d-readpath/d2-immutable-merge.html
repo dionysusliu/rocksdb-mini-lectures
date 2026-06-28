@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D2 · immutable 表层 + 分层查找差分</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="d1-sst-readpath.html">← D1</a> &nbsp;·&nbsp; <a href="index.html">Phase D</a> &nbsp;·&nbsp; D2 &nbsp;·&nbsp; <a href="d3-auto-flush.html">D3 →</a></div>
+
+  <div class="kicker">STEP D2 · Phase D 读路径</div>
+  <h1>immutable 表层 + 分层查找差分</h1>
+  <p>D1 的查找链只有两层(active → SST)。但真实引擎里,flush 不是<strong>瞬间</strong>完成的——它是慢 IO。这中间有个关键中间态:<strong>active 表满了,先"冻结"成只读的 immutable,换上新空表继续接写;旧表在后台慢慢落盘,期间仍然<strong>可读</strong>。</strong> 这一步把这层 <code>immutable</code> 塞进查找链,并上线本 Lab 的旗舰测试系统:<strong>分层查找差分</strong>。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">给 <code>Engine</code> 加 <code>imm: Vec&lt;Arc&lt;MemTable&gt;&gt;</code>(新到旧);加 <code>freeze</code>(active 整表移入 imm 头);<code>get</code> 在 active 与 SST <strong>之间</strong>夹查 imm;<code>flush</code> 推广为"排空内存(active + 所有 imm)→ 多个 SST"(<strong>截 WAL 留到 D3</strong>接上)。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> freeze 后数据仍可从 imm 读到;分层差分 harness 在 3000 步随机 put/freeze/flush 后,每步 <code>get</code> 都 == 扁平 <code>BTreeMap</code> oracle。</p>
+  </div>
+
+  <h3>为什么 active 满了要冻结而非就地清空(SuperVersion 锚)</h3>
+  <p>这正是 Phase C 核心问题 #3 埋的伏笔。如果直接清空 active,任何正拿着它的读线程会读到空表。RocksDB 的做法是 <strong>switch memtable</strong>:满表<strong>整个转为 immutable</strong>(只读、还在内存、仍服务读),装上一张新空表接写。一个读请求拿到的 <code>SuperVersion</code> = <strong>{ mem(活跃) + imm(若干只读) + current(SST 版本) }</strong> 的<strong>一致快照</strong>,整段 <code>get</code> 都基于这个快照查,不受并发 flush 影响。我们 MVP 是单线程,但用 <code>Arc&lt;MemTable&gt;</code> 把"immutable 表可被多方共享、不可变"这个语义先立住——这就是无锁读历史的地基(Phase H/J MVCC)。</p>
+  <span class="src">db/column_family.h:207 struct SuperVersion { ReadOnlyMemTable* mem; MemTableListVersion* imm; Version* current; }</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>给 <code>Engine</code> 加 <code>imm: Vec&lt;Arc&lt;MemTable&gt;&gt;</code> 字段(「代码 1」),<code>open</code> 里初始化为空。</li>
+    <li>加 <code>freeze</code>(「代码 2」);<code>get</code> 中间夹一层 imm(「代码 3」);<code>flush</code> 推广为排空内存(「代码 4」)。</li>
+    <li>敲入「代码 5」<code>frozen_immutable_still_readable</code> + 旗舰「代码 6」分层差分,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — 加 imm 字段 + 引入 Arc</h3>
+  <pre><span class="add">+ use std::sync::Arc;</span>
+
+<span class="k">pub struct</span> <span class="t">Engine</span> {
+    dir: PathBuf,
+    mem: MemTable,
+<span class="add">+   imm: Vec&lt;Arc&lt;MemTable&gt;&gt;,   // 冻结待 flush 的不可变表;index 0 = 最新</span>
+    ssts: Vec&lt;SstReader&gt;,
+    wal: Wal,
+    next_sst: u64,
+}
+<span class="c">// open(...) 里构造 Self 时加上:  imm: Vec::new(),</span></pre>
+
+  <h3>代码 2 — <code>freeze</code>:整表移入 imm</h3>
+  <pre>    <span class="c">/// 冻结 active:整表移入 imm 头部,换上新空表。</span>
+    <span class="c">/// WAL 不动——数据仍只在内存(imm),WAL 仍需保护它。只有 flush 落盘后 WAL 才可截断。</span>
+    <span class="k">pub fn</span> <span class="f">freeze</span>(&mut self) {
+        <span class="k">if</span> self.mem.<span class="f">is_empty</span>() { <span class="k">return</span>; }
+        <span class="k">let</span> old = std::mem::<span class="f">take</span>(&mut self.mem);  <span class="c">// Default = MemTable::new()</span>
+        self.imm.<span class="f">insert</span>(0, Arc::<span class="f">new</span>(old));         <span class="c">// 新冻结的排头部</span>
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>std::mem::take</code> 把 <code>self.mem</code> 换成默认值(空表)并交出旧表的所有权——一步完成"取出旧的、装上新的"。比 <code>replace(&mut self.mem, MemTable::new())</code> 更简洁(clippy 也会这么提示,因为 <code>MemTable: Default</code>)。</p>
+
+  <h3>代码 3 — <code>get</code> 夹查 imm(三层链)</h3>
+  <pre>    <span class="c">/// active → immutable(新到旧)→ SST(新到旧),第一个命中即返回。</span>
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;Value&gt; {
+        self.mem.<span class="f">get</span>(key)
+            .<span class="f">or_else</span>(|| self.imm.<span class="f">iter</span>().<span class="f">find_map</span>(|m| m.<span class="f">get</span>(key)))<span class="add">   // ← 新增中间层</span>
+            .<span class="f">or_else</span>(|| self.ssts.<span class="f">iter</span>().<span class="f">find_map</span>(|r| r.<span class="f">get</span>(key)))
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">三层全是同一个 <code>or_else + find_map</code> 模式串起来。<strong>查找链的形状没变,只是中间多接了一节</strong>——这正是 D1 把不变量编码进"序"换来的扩展性。</p>
+
+  <h3>代码 4 — <code>flush</code> 推广:排空内存 → 多个 SST</h3>
+  <pre>    <span class="c">/// 把内存里全部数据(active + 所有 imm)倒成 SST。返回写出的路径们。</span>
+    <span class="c">/// 注:截断 WAL 留到 D3 接上(见末尾 TODO),D2 先把"排空内存→多 SST"这条主链打通。</span>
+    <span class="c">/// 逐个 imm 落盘,旧→新:越新的表得到越大的编号 → 落到 ssts 头部(新到旧)。</span>
+    <span class="k">pub fn</span> <span class="f">flush</span>(&mut self) -> Result&lt;Vec&lt;PathBuf&gt;&gt; {        <span class="c">// 签名 PathBuf → Vec&lt;PathBuf&gt;</span>
+        self.<span class="f">freeze</span>();                                   <span class="c">// 把 active 也纳入本次 flush</span>
+        <span class="k">let</span> <span class="k">mut</span> paths = Vec::<span class="f">new</span>();
+        <span class="k">while</span> <span class="k">let</span> Some(imm) = self.imm.<span class="f">pop</span>() {           <span class="c">// pop = 末尾 = 最旧,先落盘</span>
+            <span class="k">let</span> path = self.dir.<span class="f">join</span>(format!(<span class="s">"{:06}.sst"</span>, self.next_sst));
+            self.next_sst += 1;
+            <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">new</span>();
+            <span class="k">for</span> (k, v) <span class="k">in</span> imm.<span class="f">iter</span>() { b.<span class="f">add</span>(&k, &v)?; }
+            b.<span class="f">finish</span>(&path)?;
+            self.ssts.<span class="f">insert</span>(0, SstReader::<span class="f">open</span>(&path)?);  <span class="c">// 刚写的最新,排头部</span>
+            paths.<span class="f">push</span>(path);
+        }
+        <span class="c">// TODO(D3):内存已排空 → 此处整截 WAL 才安全。self.wal = Wal::reset(&self.dir.join("wal.log"))?;</span>
+        <span class="c">// D2 暂不截:重开时 WAL 重放仍能恢复(值正确,只是 WAL 不回收)。截 WAL 的代码与"为什么安全"在 D3 讲透。</span>
+        Ok(paths)
+    }</pre>
+
+  <div class="warnbox"><strong>为什么先排空内存才敢整截 WAL(截 WAL 的代码 D3 接上,这里先把不变量讲清).</strong> WAL 保护的是<strong>所有还在内存</strong>的数据(active + 每个 imm)。若只 flush 一个 imm 就截 WAL,其它 imm + active 的数据会从 WAL 里被抹掉、却还没落盘 → 崩了就丢。我们 MVP 用最简单的安全策略:<strong>flush 一次性把内存全倒空,内存里啥都不剩了,才整截 WAL</strong>。RocksDB 能"只 flush 最旧那张表、只回收对应 WAL 段",靠的是给每张表/每段 WAL 编 <strong>log number</strong> 并在 MANIFEST 里记账——那是 Phase L + X。我们诚实地把它简化掉。</div>
+
+  <h3>flush 的"新到旧"怎么保住 — 走一遍</h3>
+  <p>设依次:<code>put a=1</code> → <code>freeze</code> → <code>put a=2</code> → <code>flush</code>。</p>
+  <table>
+    <thead><tr><th>动作</th><th>active</th><th>imm(新→旧)</th><th>ssts(新→旧)</th></tr></thead>
+    <tbody>
+      <tr><td>put a=1</td><td>{a=1}</td><td>[]</td><td>[]</td></tr>
+      <tr><td>freeze</td><td>{}</td><td>[{a=1}]</td><td>[]</td></tr>
+      <tr><td>put a=2</td><td>{a=2}</td><td>[{a=1}]</td><td>[]</td></tr>
+      <tr><td>flush → freeze</td><td>{}</td><td>[{a=2},{a=1}]</td><td>[]</td></tr>
+      <tr><td>pop 最旧 {a=1} → SST#0</td><td>{}</td><td>[{a=2}]</td><td>[#0:{a=1}]</td></tr>
+      <tr><td>pop {a=2} → SST#1,insert(0)</td><td>{}</td><td>[]</td><td>[#1:{a=2}, #0:{a=1}]</td></tr>
+    </tbody>
+  </table>
+  <p>最终 <code>get a</code> → active 空 → imm 空 → ssts[0]=#1 → <code>a=2</code>。<strong>最新值胜出。</strong> 旧→新落盘 + <code>insert(0)</code> 这对组合,让"内存里的新旧"无损翻译成"SST 编号的大小",新到旧的不变量一路守住。</p>
+
+  <h2>🧰 Coding style:Arc 共享不可变 · mem::take 原子换出 · 同构链的可组合</h2>
+  <ul>
+    <li><strong><code>Arc&lt;MemTable&gt;</code> = 共享的不可变所有权</strong>:immutable 表一旦冻结就<strong>只读</strong>,可能被多个读者(未来:多个 <code>SuperVersion</code> 快照)同时持有。<code>Arc</code> 让"同一份不可变数据多方共享、最后一个放手才析构"成为类型层面的保证。这是<strong>不可变 + 引用计数 = 安全共享</strong>的范式,见于 Swift class、C++ <code>shared_ptr</code>、Java GC 对象图。</li>
+    <li><strong><code>std::mem::take</code> 原子换出</strong>:<code>freeze</code> 要"把旧表拿走、立刻放一张新空表",中间一刻都不能让 <code>self.mem</code> 处于无效态。<code>take</code> 用 <code>Default</code> 一步换出,无 panic 间隙。这是 Rust 处理"移动一个 <code>&mut</code> 后面的值"的惯用法(对应 C++ move + 默认构造)。</li>
+    <li><strong>同构链可组合</strong>:三层查找全是 <code>X.or_else(|| Y).or_else(|| Z)</code>,每层内部全是 <code>iter().find_map(..)</code>。<strong>因为每层都满足同一个"返回 <code>Option</code>、内部新到旧"的契约,新增一层就是再接一节 <code>or_else</code></strong>,零额外脑力。这预告 Phase G 的 <code>MergingIterator</code>:那里把"点查命中即停"升级成"范围扫描多路归并",但"每个数据源是一个统一契约的迭代器、按新旧合并"的骨架,从这里就立住了。</li>
+  </ul>
+
+  <h2>🧠 System mindset:读时合并多个有序源 · 写快读偿 · 不可变 + 版本</h2>
+  <p>LSM 的核心权衡在这一步显形:<strong>写</strong>极快(只追加到内存表),代价是<strong>读</strong>要去多个地方合并。这种"把整理工作从写时<strong>推迟</strong>到读时(或后台)"的思路,是一大类系统的共同心法:</p>
+  <table>
+    <thead><tr><th>领域</th><th>"读时/惰性合并多个有序源"长这样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>算法</strong></td><td><strong>外部排序 / 多路归并</strong>:内存放不下,先切成多个有序 run,再 k 路归并。LSM 的 imm+SST 就是一堆 run</td></tr>
+      <tr><td><strong>分布式</strong></td><td><strong>MapReduce shuffle</strong> / Spark:各 mapper 出有序分片,reducer 归并。LSM compaction 是单机版的同一动作</td></tr>
+      <tr><td><strong>数据库</strong></td><td>多版本读:活跃事务的改动 + 已提交快照,读时按可见性合并(MVCC)</td></tr>
+      <tr><td><strong>内核(★)</strong></td><td><strong>RCU</strong>:写者造一份新副本、原子换指针、旧副本等所有读者放手才回收。我们的 <code>Arc</code>+freeze 是它的用户态雏形</td></tr>
+      <tr><td><strong>HPC</strong></td><td>log-structured / append-only 写聚合,后台再 compaction;摊薄随机写为顺序写</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:当"写路径是瓶颈"时,问一句——<strong>能不能把整理推迟?</strong> 把写做成"只追加 + 记个版本",让读/后台去合并。代价是读放大与空间放大(<strong>读/写/空间三角</strong>,Phase N/O/AF 会实测调)。反向也成立:当读是瓶颈、写很闲,就该把整理<strong>提前</strong>到写时(B-tree 原地更新)。<strong>LSM vs B-tree 的全部分歧,就是"整理放写时还是读时"这一个选择。</strong>这一框架能帮你看穿存储引擎、日志系统、甚至 CI 缓存策略的设计取舍。</p>
+
+  <h2>🧪 Harness 系统:分层查找差分(本 Lab 旗舰)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这是最强的一种验法</div>
+    <p style="margin:.3em 0 0">读路径的正确性,押在一个<strong>横跨多个组件、随时间演化</strong>的不变量上:<em>无论引擎把数据怎么摊、怎么重排(active↔imm↔SST 不停搬家),<code>get(k)</code> 永远等于"k 的最新写入值"</em>。这种不变量,用几个手写断言只能抽样几个点,抓不住"某条特定 put/freeze/flush 交织序列下,第 873 步层序错乱"这类 bug。<br><br>
+    <strong>差分(differential)</strong>的威力:拿一个<strong>显然正确但慢</strong>的参照实现(扁平 <code>BTreeMap</code>,一个 key 只存一份最新值)当 <strong>oracle</strong>,让它和被测引擎跑<strong>同一串随机操作</strong>,每步比对输出。引擎内部多复杂都没关系——只要它对外行为和那张平表无法区分,就对了。<strong>随机操作流</strong>会自动撞出你想不到的交织顺序;<strong>固定种子的伪随机</strong>让失败可复现(打印 <code>step N</code> 即可定位)。这是 property-based / model-based testing 的核心,SQLite、TiDB、FoundationDB 都靠它的重型版本守命。<br><br>
+    <strong>⏱ 跑得慢是正常的(~13s)。</strong> <code>Engine::put</code> 每写一条都 <code>wal.sync()</code>(fsync 落盘),3000 步 × 每步多次写 = 数千次真 fsync,这是磁盘往返、不是 CPU 慢。所以这条长跑差分被隔离进 CI 的 <strong>integration 档</strong>(单线程跑),不拖慢秒级反馈的单元 <code>test</code> 档。</p>
+  </div>
+
+  <h3>代码 5 — freeze 可读性(接 tests)</h3>
+  <pre>    <span class="c">// D2:freeze 把 active 移入 imm,数据仍可读;新 active 覆盖同名 key 时影子 imm。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">frozen_immutable_still_readable</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"a"</span>), <span class="f">bytes</span>(<span class="s">"1"</span>)).<span class="f">unwrap</span>();
+        e.<span class="f">freeze</span>();                                       <span class="c">// a=1 移入 imm,active 空</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"a"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"1"</span>[..]));  <span class="c">// 从 imm 读</span>
+        e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"b"</span>), <span class="f">bytes</span>(<span class="s">"2"</span>)).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"b"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"2"</span>[..]));  <span class="c">// active</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"a"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"1"</span>[..]));  <span class="c">// 仍从 imm</span>
+        e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"a"</span>), <span class="f">bytes</span>(<span class="s">"9"</span>)).<span class="f">unwrap</span>();             <span class="c">// active 覆盖</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"a"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"9"</span>[..]));  <span class="c">// active 影子 imm</span>
+    }</pre>
+
+  <h3>代码 6 — 旗舰:分层查找差分(接 tests)</h3>
+  <pre>    <span class="c">// 随机交织 put/freeze/flush;每步 get 必须 == 扁平 BTreeMap oracle。</span>
+    <span class="c">// 暂无删除 → oracle 只增/覆盖,"第一个 Some 即最新值" 成立。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">layered_lookup_differential</span>() {
+        <span class="k">fn</span> <span class="f">xorshift</span>(state: &mut u64) -> u64 {           <span class="c">// 固定种子伪随机,失败可复现</span>
+            <span class="k">let</span> <span class="k">mut</span> x = *state;
+            x ^= x &lt;&lt; 13; x ^= x &gt;&gt; 7; x ^= x &lt;&lt; 17;
+            *state = x; x
+        }
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> model: BTreeMap&lt;Vec&lt;u8&gt;, Vec&lt;u8&gt;&gt; = BTreeMap::<span class="f">new</span>();
+        <span class="k">let</span> <span class="k">mut</span> s = 0x1234_5678_9abc_def0u64;
+        <span class="k">for</span> step <span class="k">in</span> 0..3000u32 {
+            <span class="k">match</span> <span class="f">xorshift</span>(&mut s) % 100 {
+                0..=79 => {                                  <span class="c">// 80% put(~50 个热点 key,频繁覆盖)</span>
+                    <span class="k">let</span> k = format!(<span class="s">"k{:03}"</span>, <span class="f">xorshift</span>(&mut s) % 50);
+                    <span class="k">let</span> v = format!(<span class="s">"v{step}"</span>);
+                    e.<span class="f">put</span>(<span class="f">bytes</span>(&k), <span class="f">bytes</span>(&v)).<span class="f">unwrap</span>();
+                    model.<span class="f">insert</span>(k.<span class="f">into_bytes</span>(), v.<span class="f">into_bytes</span>());
+                }
+                80..=91 => e.<span class="f">freeze</span>(),                          <span class="c">// 12% freeze</span>
+                _ => { e.<span class="f">flush</span>().<span class="f">unwrap</span>(); }                     <span class="c">// 8% flush</span>
+            }
+            <span class="k">for</span> probe <span class="k">in</span> 0..50u32 {                          <span class="c">// 每步全量对拍</span>
+                <span class="k">let</span> k = format!(<span class="s">"k{probe:03}"</span>);
+                <span class="f">assert_eq!</span>(
+                    e.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">as_deref</span>(),
+                    model.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">map</span>(|v| v.<span class="f">as_slice</span>()),
+                    <span class="s">"mismatch at step {step}, key {k}"</span>);
+            }
+        }
+        e.<span class="f">flush</span>().<span class="f">unwrap</span>();                                <span class="c">// 收尾再重开,证明持久化也对(D2 未截 WAL → 重开走 WAL 重放恢复;D3 截 WAL 后才纯靠 SST)</span>
+        drop(e);
+        <span class="k">let</span> e2 = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> &model {
+            <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(k).<span class="f">as_deref</span>(), Some(v.<span class="f">as_slice</span>()));
+        }
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">D2 判定 — 全绿</div><p style="margin:.3em 0 0"><code>engine::tests::frozen_immutable_still_readable ... ok</code><br><code>engine::tests::layered_lookup_differential ... ok</code><br>(含 D1 + A/B/C 全部回归)</p></div>
+
+  <h2>🔄 CI/CD:分层差分进 integration 档</h2>
+  <p>D1 加的 <code>integration</code> 档此刻才真正发挥价值:分层差分是<strong>长跑</strong>测试(3000 步 × 50 探针)。把它放进单线程、<code>--nocapture</code> 的 integration 档,失败时 <code>panic</code> 信息里的 <code>"mismatch at step 873, key k042"</code> 会原样打出来——直接告诉你哪一步、哪个 key 错了。单元 <code>test</code> 档照旧并行快跑给即时反馈,长跑差分隔离在另一档不拖慢它。</p>
+  <pre>      <span class="c"># integration 档的关键 run(完整 yml 见 D1)</span>
+      - <span class="t">run</span>: cargo test --all engine::tests -- --nocapture --test-threads=1</pre>
+  <p style="font-size:.9em;color:var(--soft)">已本地验:该过滤命令跑 7 个 engine 测试全绿(含本课两个)。<strong>测试分层(单元快档 / 集成慢档)</strong>是可迁移的 CI 设计——任何项目都该把"秒级反馈"和"分钟级深测"分开,前者挡每次 push,后者也挡但不阻塞迭代手感。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">D2 想透这几个</div>
+    <ol>
+      <li><strong>为什么 oracle 必须比被测实现简单</strong>:我们的 oracle 是扁平 <code>BTreeMap</code>——一个 key 只存一份最新值,<strong>没有</strong>分层、没有新旧覆盖逻辑。如果 oracle 也照着"分层 + 新到旧"实现,这个差分还能抓 bug 吗?(差分的铁律:oracle 要用<strong>和被测实现不同的、更显然正确</strong>的方式算出答案。同源 = 同错。)</li>
+      <li><strong>无墓碑的红利与债</strong>:现在"第一个 <code>Some</code> 即答案"。等 Phase I 加了删除(墓碑),查找链撞到一个"删除标记"该返回什么?<code>or_else</code> 这条链还够用吗?(提示:删除是个会<strong>命中</strong>、但语义是"到此为止、返回不存在"的特殊版本。<code>or_else</code> 只认 <code>None</code> 才继续——墓碑是 <code>Some(删除)</code>,会卡在这层。这条链届时必须改造。)</li>
+      <li><strong>Arc 现在是不是多余</strong>:单线程 MVP 里 <code>imm</code> 没人并发读,用 <code>Box</code> 甚至 <code>MemTable</code> 直接存都行。为什么仍坚持 <code>Arc</code>?(为 Phase H/J/V:读者要能<strong>持快照、跨锁、并发</strong>读 immutable,而 flush 同时在背后消费它。<code>Arc</code> = "最后一个放手才回收",正是 <code>SuperVersion</code> 引用计数的雏形。提前立类型,后面不返工。)</li>
+      <li><strong>imm 列表会无限长吗</strong>:freeze 不断把表塞进 imm,flush 才清空。如果写得比 flush 快,imm 越堆越多 → 内存爆。RocksDB 怎么挡?(提示:<code>max_write_buffer_number</code> 到了就<strong>挡住写</strong>——write stall,Phase W。D3 先把"满了自动 flush"接上,W 再补"flush 跟不上就限速"。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:D3 — 满了自动 flush + 截断 WAL.</strong> 现在 freeze/flush 都得手动调。D3 让 <code>put</code> 检测 <code>is_full</code>(A3 那个信号!)自动触发,引擎第一次能"自己照顾自己";并补上 D2 留的 TODO——<code>flush</code> 落盘后 <code>Wal::reset</code> 截断 WAL(自动 flush 上线后,不截 WAL 会让它无限涨)。然后 <strong>M1 MVP 正式达成</strong>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl.cc">db_impl.cc</a> <code>GetImpl</code>(db/db_impl/db_impl.cc:3351 起 mem→imm→current 三段) · <a href="https://github.com/facebook/rocksdb/blob/main/db/column_family.h">column_family.h</a> <code>SuperVersion</code>(:207)。</p>
+    <p>想完跟我对答案,或说"继续 D3"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

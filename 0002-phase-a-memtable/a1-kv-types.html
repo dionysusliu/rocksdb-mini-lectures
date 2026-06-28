@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A1 · KV 类型 + 比较器</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">← Phase A 总览</a> &nbsp;·&nbsp; A1 / A2 / A3 &nbsp;·&nbsp; <a href="a2-memtable.html">A2 MemTable →</a></div>
+
+  <div class="kicker">STEP A1 · Phase A MemTable</div>
+  <h1>KV 类型 + 比较器</h1>
+  <p>整个 LSM 的地基是一个字：<strong>序</strong>。MemTable 有序、SST 有序、compaction 合并有序——全靠一个比较器定义"谁在前"。这一步只写它。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>src/kv.rs</code>：<code>Key</code>/<code>Value</code> 类型别名 + 一个 <code>Comparator</code> trait + 默认字节序实现 <code>BytewiseComparator</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> <code>cargo test kv</code> 全绿，表驱动用例覆盖：相等、前缀短于扩展、空串、逆序对。</p>
+  </div>
+
+  <h3>为什么先做这个（mission 锚）</h3>
+  <p>RocksDB 把比较器抽成可替换接口 <code>Comparator</code>，不是写死字节序——MyRocks 就靠自定义比较器把 SQL 索引的整数/字符串编码成可字节序比较的 key。你在 learning-record 0002 见过这种"RocksDB 是零件"的弹性。地基这一层留好接缝，后面才接得上。</p>
+  <span class="src">对标 include/rocksdb/comparator.h · util/comparator.cc:30 BytewiseComparatorImpl</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>在 <code>rocksdb-mini/src/</code> 新建 <code>kv.rs</code>，敲入下面「代码 1」。</li>
+    <li>在 <code>src/lib.rs</code> 顶部加模块声明 <code>pub mod kv;</code>（删掉默认的 <code>add</code> 示例函数与其测试）。</li>
+    <li>敲入「代码 2」表驱动 harness（放 <code>kv.rs</code> 末尾的 <code>#[cfg(test)]</code> 模块）。</li>
+    <li>跑命令，看绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>src/kv.rs</code>（核心）</h3>
+  <pre><span class="c">// src/kv.rs — KV 基本类型与比较器（mini-LSM 的"序"之根）</span>
+<span class="k">use</span> bytes::Bytes;
+<span class="k">use</span> std::cmp::Ordering;
+
+<span class="c">// Bytes = 引用计数的不可变字节缓冲，clone 是 O(1) 浅拷贝。</span>
+<span class="c">// 对标 RocksDB 的 Slice（指针+长度，零拷贝传递 key/value）。</span>
+<span class="k">pub type</span> <span class="t">Key</span> = Bytes;
+<span class="k">pub type</span> <span class="t">Value</span> = Bytes;
+
+<span class="c">/// key 上的全序关系。对标 RocksDB 的 Comparator 接口。</span>
+<span class="c">/// 抽成 trait = 留接缝：将来可换成"数值序""带 timestamp 序"而不动 MemTable。</span>
+<span class="k">pub trait</span> <span class="t">Comparator</span>: Send + Sync {
+    <span class="k">fn</span> <span class="f">compare</span>(&self, a: &[<span class="t">u8</span>], b: &[<span class="t">u8</span>]) -> Ordering;
+    <span class="k">fn</span> <span class="f">name</span>(&self) -> &<span class="t">str</span>;
+}
+
+<span class="c">/// 默认实现：原始字节的字典序。对标 BytewiseComparatorImpl。</span>
+<span class="k">pub struct</span> <span class="t">BytewiseComparator</span>;
+
+<span class="k">impl</span> <span class="t">Comparator</span> <span class="k">for</span> <span class="t">BytewiseComparator</span> {
+    <span class="k">fn</span> <span class="f">compare</span>(&self, a: &[<span class="t">u8</span>], b: &[<span class="t">u8</span>]) -> Ordering {
+        a.<span class="f">cmp</span>(b) <span class="c">// &[u8] 的 Ord 即逐字节字典序</span>
+    }
+    <span class="k">fn</span> <span class="f">name</span>(&self) -> &<span class="t">str</span> {
+        <span class="s">"mini.BytewiseComparator"</span> <span class="c">// 命名是为了将来格式兼容性校验（见核心问题 3）</span>
+    }
+}</pre>
+
+  <h2>Harness 系统 ①：表驱动测试</h2>
+  <div class="harness">
+    <div class="kicker">为什么这里用表驱动</div>
+    <p style="margin:.3em 0 0">比较器的 bug 全在<strong>边界</strong>：空串、前缀关系、相等、对称性。这类"同一段断言逻辑 × 一堆输入用例"的场景，表驱动是最省的——
+    用例表是数据，断言是代码，加一行用例零成本，且漏掉的边界一眼能看出来。这是 Go 标准库和 RocksDB 参数化测试的主力风格，纯可迁移技能。</p>
+  </div>
+
+  <h3>代码 2 — 表驱动 harness（接在 <code>kv.rs</code> 末尾）</h3>
+  <pre><span class="c">#[cfg(test)]</span>
+<span class="k">mod</span> tests {
+    <span class="k">use</span> super::*;
+
+    <span class="c">// 一行 = 一个用例：(左, 右, 期望的序关系, 这条在验什么)</span>
+    <span class="k">fn</span> <span class="f">cmp</span>(a: &[<span class="t">u8</span>], b: &[<span class="t">u8</span>]) -> Ordering {
+        BytewiseComparator.<span class="f">compare</span>(a, b)
+    }
+
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">bytewise_order_table</span>() {
+        <span class="k">let</span> cases: &[(&[<span class="t">u8</span>], &[<span class="t">u8</span>], Ordering, &<span class="t">str</span>)] = &[
+            (b<span class="s">"a"</span>,   b<span class="s">"a"</span>,   Ordering::Equal,   <span class="s">"相等"</span>),
+            (b<span class="s">"a"</span>,   b<span class="s">"b"</span>,   Ordering::Less,    <span class="s">"逐字节小"</span>),
+            (b<span class="s">"a"</span>,   b<span class="s">"ab"</span>,  Ordering::Less,    <span class="s">"前缀短于扩展"</span>),
+            (b<span class="s">"ab"</span>,  b<span class="s">"a"</span>,   Ordering::Greater, <span class="s">"扩展长于前缀"</span>),
+            (b<span class="s">""</span>,    b<span class="s">"a"</span>,   Ordering::Less,    <span class="s">"空串最小"</span>),
+            (b<span class="s">""</span>,    b<span class="s">""</span>,    Ordering::Equal,   <span class="s">"空=空"</span>),
+            (&[<span class="s">0xFF</span>], &[<span class="s">0x00</span>], Ordering::Greater, <span class="s">"按 u8 非符号比较"</span>),
+        ];
+        <span class="k">for</span> (a, b, want, why) <span class="k">in</span> cases {
+            <span class="f">assert_eq!</span>(<span class="f">cmp</span>(a, b), *want, <span class="s">"用例失败: {}"</span>, why);
+            <span class="c">// 对称性不变量：a?b 必须与 b?a 互为反序</span>
+            <span class="f">assert_eq!</span>(<span class="f">cmp</span>(b, a), want.<span class="f">reverse</span>(), <span class="s">"对称性破: {}"</span>, why);
+        }
+    }
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test kv</div>
+  <div class="done"><div class="kicker">看到这个就过</div><p style="margin:.3em 0 0"><code>test kv::tests::bytewise_order_table ... ok</code></p></div>
+
+  <h2>核心问题（自己答，别急着问我）</h2>
+  <div class="ask">
+    <div class="kicker">想清楚再进 A2</div>
+    <ol>
+      <li><strong>全序的四条性质</strong>：一个 <code>Comparator</code> 要能正确排序，<code>compare</code> 必须满足哪四条数学性质（自反、反对称、传递、全序完备）？如果传递性被破坏（<code>a&lt;b, b&lt;c</code> 却 <code>a&gt;c</code>），跳表/SST 的二分查找会出什么后果？</li>
+      <li><strong>为什么抽成 trait</strong>：RocksDB 为何不把字节序写死？举一个"换比较器"才能干成的真实需求（提示：MyRocks 的 SQL 索引 key 编码，learning-record 0002）。</li>
+      <li><strong><code>name()</code> 有什么用</strong>：RocksDB 把比较器名字写进 SST/MANIFEST。为什么——用错比较器打开旧数据会发生什么？（这条关系到 Phase C 持久化格式的安全。）</li>
+      <li><strong>Bytes vs &[u8] vs Vec&lt;u8&gt;</strong>：为什么 <code>Key=Bytes</code> 而非 <code>Vec&lt;u8&gt;</code>？clone 成本差在哪？这和 RocksDB 用 <code>Slice</code> 而非 <code>std::string</code> 传 key 是同一个动机吗？</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/include/rocksdb/comparator.h">comparator.h</a> 读 <code>Compare/Name</code> 注释 ·
+       <a href="https://skyzh.github.io/mini-lsm/week1-01-memtable.html">skyzh W1D1</a> 的 key/value 类型选择。</p>
+    <p><strong>下一步.</strong> 比较器就位 → <a href="a2-memtable.html">A2：用它的序建一张能写能查的 MemTable</a>，并学第二种 harness：模型差分。</p>
+    <p>不清楚的随时问我。</p>
+  </div>
+</div>
+</body>
+</html>

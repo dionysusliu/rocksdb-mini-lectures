@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E3 · 基准:flat vs block 的 A/B</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .win{color:var(--good);font-weight:bold}.lose{color:var(--accent);font-weight:bold}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="e2-block-sst.html">← E2</a> &nbsp;·&nbsp; <a href="index.html">Phase E</a> &nbsp;·&nbsp; E3 &nbsp;·&nbsp; <a href="e4-restart-prefix.html">E4 →</a></div>
+
+  <div class="kicker">STEP E3 · Phase E block-based SST</div>
+  <h1>基准:flat(Phase D) vs block(Phase E) 的 A/B</h1>
+  <p>E1/E2 把 SST 块化了,但"快了多少、省了多少"还只是<strong>口头声称</strong>。这一步造一个最小的基准台,把 Phase D 的<strong>扁平 SST</strong> 和 Phase E 的<strong>块化 SST</strong> 放进<strong>同一个二进制</strong>,喂同一份数据、同一组随机查询(同种子),实测三件事:<strong>磁盘大小</strong>、<strong>索引内存</strong>、<strong>读延迟(冷/热)</strong>。对标 RocksDB 的 <code>db_bench</code>(<code>fillseq</code> / <code>readrandom</code> / <code>readmissing</code>)。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">冻结 Phase D 的扁平 SST 为 <code>sst_flat.rs</code> 基线(不再改),新建 <code>nocache.rs</code>(手写 <code>F_NOCACHE</code> 冷读)和 <code>bin/bench.rs</code>(手写 SplitMix64 + 正确性闸门 + 指标表)。<code>cargo run --release --bin bench</code> 一条命令出对照表。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 正确性闸门绿(<code>flat.get == block.get == oracle</code>,不绿不出数);表里 <strong>索引内存</strong>、<strong>读放大</strong>、<strong>冷读交叉点</strong> 三项都能读出块化的代价与收益——并能<strong>诚实</strong>说出块化在<strong>热点查上反而略慢</strong>。</p>
+  </div>
+
+  <div class="warnbox"><strong>诚实是这节课的主轴.</strong> 块化不是"全面更快"。它在<strong>磁盘 / 索引内存 / 冷读选择性查</strong>上赢,在<strong>热点查</strong>上输给"整文件常驻 + 直接偏移"的扁平实现。一个只报喜不报忧的基准是<strong>骗自己</strong>。这节课的价值,一半在数字,一半在<strong>敢把不利的那一栏也印出来</strong>。</p></div>
+
+  <h3>为什么是"两个版本同进一个二进制"?(方法学锚)</h3>
+  <p>对比两版代码,最容易翻车的是<strong>负载漂移</strong>——两次 run 的数据/查询序列稍有不同,数字就没法比。我们把扁平版冻结成 <code>sst_flat.rs</code>、块化版就是现在的 <code>sst.rs</code>,二者<strong>签名完全一致</strong>(<code>new/add/finish/open/get</code>),<code>bin/bench.rs</code> 同时 import 两者,用<strong>同一个 SplitMix64 种子</strong>生成数据与查询。这样"唯一变量"就只剩格式本身。<strong>git checkout 老版本再跑</strong>是另一条路,但两个二进制、两次环境,极易引入偏差——A/B 要可信,就把变量锁到只剩一个。</p>
+  <span class="src">RocksDB 对标:tools/db_bench_tool.cc(fillseq / readrandom / readmissing)· 我们只取点查相关子集;readseq/seekrandom 等迭代器负载留到 Phase F 有了 iterator 再补。</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>把 Phase D 的扁平 <code>sst.rs</code> 整体复制为 <code>src/sst_flat.rs</code>(改模块名/报错字样即可),再给它的 <code>SstReader</code> 补三个测量方法:<code>index_bytes()</code>、<code>bytes_read()</code>、<code>open_cold()</code>(「代码 1」)。block 版 <code>sst.rs</code> 同样补这三个(<code>read_block</code> 里累加 <code>bytes_read</code>)。</li>
+    <li>新建 <code>src/nocache.rs</code>:手写 <code>extern "C" fcntl</code> + Darwin <code>F_NOCACHE</code>,让某个 fd 绕开 page cache(「代码 2」)。<code>lib.rs</code> 加 <code>pub mod block; pub mod nocache; pub mod sst_flat;</code>。</li>
+    <li>新建 <code>src/bin/bench.rs</code>:手写 <code>SplitMix64</code>、生成 1M 条数据、<strong>正确性闸门</strong>、静态指标 + readrandom(冷/热) + readmissing(「代码 3/4」)。</li>
+    <li><code>cargo run --release --bin bench</code>,读那张表。</li>
+  </ol>
+
+  <h3>代码 1 — 给两个 reader 补测量方法</h3>
+  <pre><span class="c">// sst_flat.rs(扁平基线):整文件载入,索引每条一项</span>
+<span class="k">impl</span> <span class="t">SstReader</span> {
+    <span class="k">pub fn</span> <span class="f">open_cold</span>(path: &Path) -> Result&lt;Self&gt; { Self::<span class="f">open_inner</span>(path, <span class="k">true</span>) }
+    <span class="k">fn</span> <span class="f">open_inner</span>(path: &Path, cold: bool) -> Result&lt;Self&gt; {
+        <span class="k">let</span> <span class="k">mut</span> f = File::<span class="f">open</span>(path)?;
+        <span class="k">if</span> cold { crate::nocache::<span class="f">set_nocache</span>(&f); } <span class="c">// 冷读:先关缓存,再 read_to_end 真打盘</span>
+        <span class="k">let</span> <span class="k">mut</span> raw = Vec::new(); f.<span class="f">read_to_end</span>(&<span class="k">mut</span> raw)?;
+        <span class="k">let</span> bytes_read = raw.<span class="f">len</span>() <span class="k">as</span> u64; <span class="c">// 扁平读路径:open 就吞下整文件</span>
+        <span class="c">/* …footer/index 解析同 Phase D… */</span>
+        Ok(Self { raw, index, bytes_read })
+    }
+    <span class="c">/// 常驻 RAM 索引:每条 entry 一项 = key 字节 + 8(offset)</span>
+    <span class="k">pub fn</span> <span class="f">index_bytes</span>(&self) -> usize { self.index.<span class="f">iter</span>().<span class="f">map</span>(|(k,_)| k.<span class="f">len</span>()+8).<span class="f">sum</span>() }
+    <span class="k">pub fn</span> <span class="f">bytes_read</span>(&self) -> u64 { self.bytes_read }
+}
+
+<span class="c">// sst.rs(块化):稀疏索引,每块一项;read_block 里累加 bytes_read</span>
+<span class="k">impl</span> <span class="t">SstReader</span> {
+    <span class="k">pub fn</span> <span class="f">open_cold</span>(path: &Path) -> Result&lt;Self&gt; { Self::<span class="f">open_inner</span>(path, <span class="k">true</span>) } <span class="c">// fd 设 F_NOCACHE</span>
+    <span class="c">/// 稀疏索引:每块一项 = 末键字节 + 16(BlockHandle)</span>
+    <span class="k">pub fn</span> <span class="f">index_bytes</span>(&self) -> usize { self.index.<span class="f">iter</span>().<span class="f">map</span>(|(k,_)| k.<span class="f">len</span>()+16).<span class="f">sum</span>() }
+    <span class="k">pub fn</span> <span class="f">bytes_read</span>(&self) -> u64 { self.bytes_read.<span class="f">load</span>(Ordering::Relaxed) }
+}</pre>
+
+  <h3>代码 2 — <code>nocache.rs</code>:手写 FFI 关掉 page cache</h3>
+  <pre><span class="c">// 让某个文件 fd 绕开 OS page cache,后续每次读都真打磁盘。仅 bench 用。</span>
+<span class="c">// 不引 libc 依赖——自己声明 extern "C" fcntl。</span>
+<span class="c">#[cfg(target_os = "macos")]</span>
+<span class="k">mod</span> imp {
+    <span class="k">use</span> std::os::unix::io::AsRawFd;
+    <span class="k">const</span> F_NOCACHE: i32 = 48; <span class="c">// &lt;sys/fcntl.h&gt; Darwin:关闭该 fd 的数据缓存</span>
+    <span class="k">unsafe extern</span> <span class="s">"C"</span> { <span class="k">fn</span> <span class="f">fcntl</span>(fd: i32, cmd: i32, arg: i32) -> i32; }
+    <span class="k">pub fn</span> <span class="f">set_nocache</span>&lt;F: AsRawFd&gt;(f: &F) {
+        <span class="k">unsafe</span> { <span class="f">fcntl</span>(f.<span class="f">as_raw_fd</span>(), F_NOCACHE, 1); } <span class="c">// 失败(-1)就当冷读不可用,不影响正确性</span>
+    }
+}
+<span class="c">#[cfg(not(target_os = "macos"))]</span>
+<span class="k">mod</span> imp { <span class="c">/* Linux 用 posix_fadvise(DONTNEED);此处教学只覆盖 macOS,其余 no-op */</span>
+    <span class="k">use</span> std::os::unix::io::AsRawFd;
+    <span class="k">pub fn</span> <span class="f">set_nocache</span>&lt;F: AsRawFd&gt;(_f: &F) {}
+}
+<span class="k">pub use</span> imp::set_nocache;</pre>
+  <div class="warnbox"><strong>为什么 <code>F_NOCACHE</code> 而不是 <code>purge</code>?</strong> 要测"冷读"就得让 <code>get</code> 真打磁盘,而非命中 page cache。macOS 的 <code>purge</code> 会清<strong>全系统</strong>缓存——又慢又吵(别的进程立刻把缓存填回来)。<code>fcntl(fd, F_NOCACHE)</code> 是<strong>外科手术式</strong>的:只对<strong>这一个文件</strong>关缓存,不用 sudo,可复现。Linux 没有等价 per-fd 开关,真做要 <code>posix_fadvise(POSIX_FADV_DONTNEED)</code>。</div>
+
+  <h3>代码 3 — <code>bin/bench.rs</code>:SplitMix64 + 数据生成 + 正确性闸门</h3>
+  <pre><span class="k">use</span> rocksdb_mini::{sst, sst_flat};
+
+<span class="c">// 手写 SplitMix64:零依赖、可复现。同一种子喂两个格式,A/B 无偏。</span>
+<span class="k">struct</span> <span class="t">SplitMix64</span>(u64);
+<span class="k">impl</span> <span class="t">SplitMix64</span> {
+    <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) -> u64 {
+        self.0 = self.0.<span class="f">wrapping_add</span>(0x9E3779B97F4A7C15);
+        <span class="k">let</span> <span class="k">mut</span> z = self.0;
+        z = (z ^ (z &gt;&gt; 30)).<span class="f">wrapping_mul</span>(0xBF58476D1CE4E5B9);
+        z = (z ^ (z &gt;&gt; 27)).<span class="f">wrapping_mul</span>(0x94D049BB133111EB);
+        z ^ (z &gt;&gt; 31)
+    }
+    <span class="k">fn</span> <span class="f">below</span>(&<span class="k">mut</span> self, n: u64) -> u64 { self.<span class="f">next</span>() % n }
+}
+
+<span class="k">const</span> SEED: u64 = 0x6d696e69_6c736d70;  <span class="c">// 打印出来便于复现</span>
+<span class="k">const</span> N: u64 = 1_000_000;               <span class="c">// db_bench 默认量级</span>
+<span class="k">fn</span> <span class="f">key_of</span>(i: u64) -> [u8; 16] { <span class="c">/* "{i:016}":16B 定宽,字典序==数值序 */</span> }
+<span class="k">fn</span> <span class="f">val_of</span>(i: u64) -> Vec&lt;u8&gt; { <span class="c">/* 定长 100B */</span> }
+
+<span class="c">// 正确性闸门:不绿不许出数。flat == block == oracle。</span>
+<span class="k">let</span> f = sst_flat::SstReader::<span class="f">open</span>(&flat_path)?;
+<span class="k">let</span> b = sst::SstReader::<span class="f">open</span>(&block_path)?;
+<span class="k">for</span> _ <span class="k">in</span> 0..50_000 {                          <span class="c">// 5 万随机命中</span>
+    <span class="k">let</span> i = r.<span class="f">below</span>(N); <span class="k">let</span> k = <span class="f">key_of</span>(i); <span class="k">let</span> want = <span class="f">val_of</span>(i);
+    <span class="f">assert_eq!</span>(f.<span class="f">get</span>(&k).<span class="f">as_deref</span>(), Some(&want[..]));
+    <span class="f">assert_eq!</span>(b.<span class="f">get</span>(&k).<span class="f">as_deref</span>(), Some(&want[..]));
+}
+<span class="k">for</span> _ <span class="k">in</span> 0..10_000 {                          <span class="c">// 1 万必然不存在(N+idx)</span>
+    <span class="k">let</span> miss = <span class="f">key_of</span>(N + r.<span class="f">below</span>(N));
+    <span class="f">assert_eq!</span>(f.<span class="f">get</span>(&miss), None); <span class="f">assert_eq!</span>(b.<span class="f">get</span>(&miss), None);
+}</pre>
+
+  <h3>代码 4 — 三组测量(静态 / 热 / 冷)</h3>
+  <pre><span class="c">// 静态:文件大小(fs::metadata)+ 常驻索引(index_bytes)</span>
+<span class="c">// 热 readrandom:open 一次,反复点查,median of 9 trials;黑盒化防优化掉</span>
+<span class="k">let</span> t = Instant::<span class="f">now</span>();
+<span class="k">for</span> k <span class="k">in</span> &hits { <span class="k">if let</span> Some(v) = b.<span class="f">get</span>(k) { acc ^= v[0]; } }
+std::hint::<span class="f">black_box</span>(acc);
+<span class="k">let</span> ns_per_op = t.<span class="f">elapsed</span>().<span class="f">as_nanos</span>() / q;
+
+<span class="c">// 冷 readrandom(Q-sweep):每个 Q,fresh open_cold + Q 次点查,记总墙钟 + 读盘字节</span>
+<span class="k">for</span> &qn <span class="k">in</span> &[1_000, 10_000, 100_000] {
+    <span class="k">let</span> br = sst::SstReader::<span class="f">open_cold</span>(&block_path)?; <span class="c">// F_NOCACHE:每次 read_block 真打盘</span>
+    <span class="k">for</span> k <span class="k">in</span> &keys { std::hint::<span class="f">black_box</span>(br.<span class="f">get</span>(k)); }
+    <span class="k">let</span> bytes = br.<span class="f">bytes_read</span>(); <span class="c">// block:只 pread 命中的块;flat:open 即整文件</span>
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo run --release --bin bench</div>
+
+  <h2>实测结果(本机 · macOS · 1M×116B · block=4KB)</h2>
+  <p style="font-size:.9em;color:var(--soft)">你的绝对数字会因机器而异,但<strong>三条结论的方向</strong>应当一致。</p>
+
+  <h3>① 静态:磁盘 + 索引内存(H1)</h3>
+  <table>
+    <thead><tr><th>指标</th><th>flat(Phase D)</th><th>block(Phase E)</th><th>读这一行</th></tr></thead>
+    <tbody>
+      <tr><td>file size on disk</td><td>152.0 MB</td><td class="win">129.5 MB</td><td>块化已小 <strong>~15%</strong> ——扁平把<strong>全量索引(24MB)也写进文件</strong>;稀疏索引只占 ~1MB</td></tr>
+      <tr><td>index bytes in RAM</td><td>24.0 MB</td><td class="win">1.0 MB</td><td><strong>24× 更小</strong>:每条一项 → 每块一项</td></tr>
+      <tr><td>data blocks</td><td>—</td><td>31 250</td><td>1M 条 / ~4KB 块</td></tr>
+    </tbody>
+  </table>
+  <p><strong>意外但关键:</strong>"块化省磁盘"这件事<strong>现在就成立了</strong>,还没上压缩!原因不在数据区,而在<strong>索引</strong>:扁平格式把"每条 entry 一个索引项"也<strong>落进了文件</strong>(24MB),块化的稀疏索引只有 ~1MB。所以磁盘 152→129.5MB 的差,基本就是<strong>索引瘦身</strong>。数据区本身的压缩赢面,要到 <strong>E5</strong> 才叠加上来。</p>
+
+  <h3>② 热点查 readrandom / readmissing(page cache 热)</h3>
+  <table>
+    <thead><tr><th>负载</th><th>flat</th><th>block</th><th>读这一行</th></tr></thead>
+    <tbody>
+      <tr><td>readrandom(命中)</td><td class="win">~1190 ns/op</td><td class="lose">~1440 ns/op</td><td>块化<strong>反而慢</strong>:每次 <code>pread</code>+解块 vs 扁平纯内存偏移</td></tr>
+      <tr><td>readmissing(全不存在)</td><td>~58 ns/op</td><td class="win">~45 ns/op</td><td>块化的越界 miss <strong>一块都不读</strong>,稀疏索引上二分极快</td></tr>
+    </tbody>
+  </table>
+  <p><strong>这就是要诚实印出来的那一栏。</strong>热点查里扁平赢——它整文件常驻 RAM,<code>get</code> 就是一次二分 + 一次偏移解码,没有 IO、没有解块。块化每次 <code>get</code> 都重读+重解一个块。这<strong>不是 bug</strong>,是块化的固有代价:它把"全载内存"换成了"按需 IO + 有界内存"。补回热点性能正是 <strong>Phase S(block cache)</strong> 的活——把解析好的热块缓存在用户态,块化才能在热点查上追平甚至反超。</p>
+
+  <h3>③ 冷读 H2:open + Q 次点查的总墙钟(F_NOCACHE)</h3>
+  <table>
+    <thead><tr><th>Q(随机点查数)</th><th>flat 总时 / 读盘</th><th>block 总时 / 读盘</th><th>谁赢</th></tr></thead>
+    <tbody>
+      <tr><td>1 000</td><td>33 ms / 152 MB</td><td class="win">1 ms / 4.1 MB</td><td>block <strong>~33×</strong></td></tr>
+      <tr><td>10 000</td><td>45 ms / 152 MB</td><td class="win">17 ms / 41 MB</td><td>block ~2.6×</td></tr>
+      <tr><td>100 000</td><td class="win">161 ms / 152 MB</td><td>174 ms / 410 MB</td><td>flat 反超</td></tr>
+    </tbody>
+  </table>
+  <p><strong>交叉线是这节课最有信息量的图.</strong> flat 每次冷 <code>open</code> 都得吞下<strong>整个 152MB 文件</strong>(无论你只查 1 个还是 10 万个 key);block 只 <code>pread</code> 命中的那些块。所以:</p>
+  <ul>
+    <li><strong>Q 小(选择性读)</strong>:block 完胜——查 1000 个 key 只搬 4MB,flat 却要搬 152MB。</li>
+    <li><strong>Q 大(逼近全量扫)</strong>:flat 反超——它整文件读<strong>一次</strong>就够;block 每个 get 重读一块,<strong>同一热块被重复 pread</strong>(100k 次查搬了 410MB &gt; 文件本身!)。</li>
+  </ul>
+  <p>那个"410MB &gt; 152MB 文件"正是 <strong>没有 block cache</strong> 的代价:重复读同一批块。这条交叉线同时给出了后续两个 phase 的<strong>动机</strong>:bloom(让 miss 连块都不读)、block cache(让热块不重复读盘)。</p>
+
+  <h2>🧰 Coding style:extern "C" FFI · cfg 平台门 · <code>black_box</code> · median-of-N</h2>
+  <ul>
+    <li><strong>手写 <code>extern "C"</code> FFI</strong>:不引 <code>libc</code> crate,自己声明 <code>fcntl</code> 的签名 + Darwin 常量 <code>F_NOCACHE=48</code>。这是"<strong>只为一个 syscall 付一行 FFI</strong>"的范式——任何语言 bind 到 C ABI 都是这套(声明签名、<code>unsafe</code> 调用、自己负责正确性)。</li>
+    <li><strong><code>#[cfg(target_os)]</code> 平台门</strong>:macOS 走 <code>F_NOCACHE</code>,其它平台 no-op。把<strong>平台差异收敛在一个模块边界内</strong>,调用方(bench)无感。这是跨平台代码的标准切法。</li>
+    <li><strong><code>std::hint::black_box</code></strong>:基准里最隐蔽的坑是<strong>编译器把"没用到结果的循环"整段优化掉</strong>,于是你测了个 0ns。<code>black_box</code> 告诉优化器"假装这个值被用了",强制真跑。任何微基准都要它。</li>
+    <li><strong>median-of-N 而非单次/均值</strong>:笔记本上有调度抖动、温度墙、后台进程。取<strong>中位数</strong>比均值抗离群点(一次 GC/抢占就能把均值拉飞)。再配<strong>固定种子</strong>,结果可复现。</li>
+  </ul>
+
+  <h2>🧠 System mindset:page cache · 冷热分离 · 摊薄 · 诚实测量</h2>
+  <table>
+    <thead><tr><th>概念</th><th>本阶段怎么体现 / 跨域同构</th></tr></thead>
+    <tbody>
+      <tr><td><strong>page cache 冷热</strong></td><td>同一份代码,缓存热 vs 冷,结论<strong>相反</strong>(热:flat 赢;冷选择性:block 赢)。不区分冷热的基准是<strong>无意义的</strong>。同构:CPU cache 命中/失效、JIT 预热、CDN 冷启动、数据库 buffer pool 命中率。</td></tr>
+      <tr><td><strong>摊薄(amortization)</strong></td><td>flat 的 <code>open</code> 成本(读整文件)<strong>固定</strong>,Q 越大越被摊薄;block 的成本<strong>随 Q 线性</strong>。两条成本曲线一定有交叉。这是"固定开销 vs 边际开销"的经典权衡——批处理、连接池、JIT 编译都在算这笔账。</td></tr>
+      <tr><td><strong>读放大可量化</strong></td><td><code>bytes_read</code> 把"搬了多少字节"变成数字。block 在 Q=100k 搬了 410MB(&gt;文件),一眼看出"<strong>重复读同块</strong>"的浪费——这就是 cache 的<strong>定量动机</strong>,不是拍脑袋。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:做任何性能声称前,先问"<strong>冷还是热?选择性读还是全量扫?固定开销还是边际开销?</strong>"。一个数字脱离这三问就是<strong>误导</strong>。块化 SST 是个完美教具:它在一半场景赢、一半场景输,逼你说清"<strong>赢在哪、为什么</strong>"。</p>
+
+  <h2>🧪 Harness 系统:A/B 差分闸门 + 测量方法学</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">基准最危险的失败模式是"<strong>快但是错</strong>"——一个跳过了某些工作的 reader 当然快,但它返回错值。所以 <code>bin/bench</code> 在出任何数字<strong>之前</strong>先过一道<strong>正确性闸门</strong>:<code>flat.get == block.get == val_of(i)</code> 在 5 万命中 + 1 万 miss 上全相等,不绿就 panic、一个数字都不印。其次是<strong>"what + why"双层指标</strong>:延迟(what)告诉你<strong>快了多少</strong>,<code>bytes_read</code>/<code>blocks_read</code>(why)告诉你<strong>为什么</strong>——410MB 那个数字让"块化在全量扫上输"从现象变成<strong>可解释的机理</strong>。光有秒表的基准只能让你<strong>惊讶</strong>,配上计数器才能让你<strong>理解</strong>。</p>
+  </div>
+
+  <div class="done"><div class="kicker">E3 判定 — 全绿</div><p style="margin:.3em 0 0"><code>building 1000000 entries ... done</code><br><code>correctness gate: OK (flat == block == oracle on 50k hits + 10k misses)</code><br>静态表 / 热表 / 冷读 Q-sweep 三张表打印完整<br>+ <code>cargo test</code> 仍 <strong>17 passed</strong>(引擎与既有 SST 测试不受影响)</p></div>
+
+  <h2>🔄 CI/CD:基准存在,回归门暂缓到 Phase R</h2>
+  <p>这节课<strong>只是把基准跑起来、人工读表</strong>,还<strong>不</strong>接 CI 回归门。把"benchmark 回归 gate(接 storage-benchmark-lab)"留到 <strong>Phase R</strong>——那时有了 bloom,性能门才有足够稳定的指标去守(p50/p99 + 读放大计数),才值得在 CI 里设阈值挡退化。现在过早设门只会被笔记本抖动反复误报。<strong>CI 弧线的纪律:先有可信指标,再设门。</strong></p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">E3 想透这几个</div>
+    <ol>
+      <li><strong>没压缩为何磁盘已经小了?</strong> 块化数据区和扁平几乎一样大(都是 1M 条原始字节),可文件却小了 15%。省在哪?(提示:扁平的<strong>全量索引也在文件里</strong>。块化把它换成稀疏索引——磁盘和内存<strong>同时</strong>瘦。压缩省的是<strong>数据区</strong>,那是 E5 的事。)</li>
+      <li><strong>热点查块化为何反而慢?</strong> 同样命中,block ~1440ns vs flat ~1190ns。慢在哪一步?(提示:flat 整文件<strong>常驻 RAM</strong>,get = 二分 + 偏移;block 每次 <code>read_exact_at</code> 重读一块 + <code>Block::decode</code> 重解 offsets。谁能省掉"重读+重解"?→ Phase S 的 block cache 缓存<strong>解析好的 Block</strong>。)</li>
+      <li><strong>冷读交叉点说明什么?</strong> Q=1000 时 block 33× 快,Q=100k 时 flat 反超。这条交叉线在工程上意味着什么?(提示:LSM 的真实读负载是<strong>高度选择性</strong>的——配合 bloom + cache,你几乎只读真正需要的那几块。flat 的"整文件常驻"在小数据集上能赢,但<strong>不可扩展</strong>:文件 1TB 时它根本载不进内存。块化是为<strong>可扩展</strong>而生。)</li>
+      <li><strong>410MB &gt; 152MB 文件,意味着什么浪费?</strong> 10 万次冷点查,block 搬了 410MB,比整个文件还多。为什么?怎么消除?(提示:<strong>同一个热块被重复 pread</strong>。一个 LRU <strong>block cache</strong> 让第二次起命中内存——Phase S 正是要把这 410MB 压回去。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:E4 — restart points + 前缀键压缩.</strong> E1 里我们 <code>restart_interval=1</code>、把前缀压缩"留作后续"。E4 把它兑现:块内每隔 K 条设一个 restart 点存完整 key,其余 entry 只存"与前一条共享的前缀长度 + 后缀"。对排好序、前缀相似的 key(如 <code>user:00001</code>…),块更小(<strong>数据区</strong>第一次缩水),块内查找仍能二分(靠 restart 数组)。对标 <code>block_builder.cc</code> 的 restart 机制。完成后回到 E3 重跑基准,看<strong>磁盘那一栏继续下降</strong>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/tools/db_bench_tool.cc">db_bench_tool.cc</a>(fillseq/readrandom/readmissing 的负载定义)· <code>fcntl(2)</code> <code>F_NOCACHE</code>(Darwin)· <code>posix_fadvise(2)</code> <code>POSIX_FADV_DONTNEED</code>(Linux 冷读对应物)。</p>
+    <p>想完跟我对答案,或说"继续 E4"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

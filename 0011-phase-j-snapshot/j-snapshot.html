@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J · snapshot + get_as_of</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">Phase J</a> &nbsp;·&nbsp; J</div>
+
+  <div class="kicker">STEP J · Phase J 快照</div>
+  <h1>snapshot + get_as_of — 把"读哪个版本"变成参数</h1>
+  <p>H3 的读路径处处写死 <code>snap = Seq::MAX</code>。本课把它抽成参数,落地 MVCC 时间旅行的点读版。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0"><code>Engine::snapshot() -&gt; Seq</code> 抓当前序列号;<code>get_as_of(key, snapshot)</code> 只看 <code>seq &lt; snapshot</code> 的版本;<code>get</code> 改成 <code>get_as_of(key, self.seq)</code>。修正 <code>internal_key::lookup_key</code> 的 seek-type。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 历史快照读到当时版本(无视之后写/删);快照跨 flush 仍有效;空快照/未来写不可见;既有 H 测试全回归。</p>
+  </div>
+
+  <h3>快照 = 一个独占上界 seq</h3>
+  <p>快照就是一个数:<strong>序列号上界</strong>。约定 <code>snapshot()</code> 返回 <code>self.seq</code>(下一个要分配的 seq),语义是"<strong>seq &lt; snapshot 的版本可见,&gt;= 的不可见</strong>"。为什么这样就对?</p>
+  <table>
+    <thead><tr><th>事实</th><th>推论</th></tr></thead>
+    <tbody>
+      <tr><td>已写入的版本 seq ∈ [0, self.seq)</td><td>snapshot = self.seq ⇒ 全部已写可见</td></tr>
+      <tr><td>之后的写拿到 seq ≥ self.seq</td><td>≥ snapshot ⇒ 对这个快照不可见</td></tr>
+      <tr><td>空引擎 self.seq = 0</td><td>snapshot = 0 ⇒ 无任何版本可见(之后的写 seq 0 也 ≥ 0,挡住)</td></tr>
+    </tbody>
+  </table>
+  <p>所以"抓快照"就是<strong>记下此刻的 self.seq</strong>——O(1),不拷数据、不锁。读时拿这个数过滤版本。RocksDB 的 snapshot 本质也是一个 sequence number(<code>SnapshotImpl::number_</code>),外加一个引用让 compaction 别回收它需要的旧版本(我们 MVP 单线程不涉及那层 GC 协调)。</p>
+
+  <div class="warnbox"><strong>独占上界 vs 包含上界——差一就错。</strong> 我们用<strong>独占</strong>(visible iff <code>seq &lt; snapshot</code>),配合 <code>snapshot()=self.seq</code>,空引擎和未来写都干净。落到 <code>get_newest(uk, s)</code>(它找 <code>seq &lt;= s</code>),要传 <code>s = snapshot - 1</code>;<code>snapshot==0</code> 时直接返回 None(没有 <code>seq &lt; 0</code>)。这个 off-by-one 是快照实现最容易错的地方——<strong>先把"可见 = seq ? snapshot"的不等号方向钉死,再决定传给 lower_bound 的值</strong>。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li><code>internal_key::lookup_key</code> 的 type 从 <code>TYPE_VALUE</code> 改成 <code>0</code>(最小 type),修 seek 跳墓碑的潜伏 bug(「代码 1」)。</li>
+    <li><code>Engine::snapshot</code> + <code>get_as_of</code>;<code>get</code> 转发 <code>get_as_of(key, self.seq)</code>(「代码 2」)。</li>
+    <li>敲入「代码 3」时间旅行 harness,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — 修 lookup_key 的 seek-type(internal_key.rs)</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">lookup_key</span>(user_key: &[u8], snapshot_seq: Seq) -> Bytes {
+        <span class="c">// type 取最小(0):同一 seq 上墓碑(0)排在 value(1)前,</span>
+        <span class="c">// lookup 用最小 type 才排在该 seq 任何条目前/相等,lower_bound 不跳墓碑。</span>
+        <span class="f">encode</span>(user_key, snapshot_seq, 0)
+    }</pre>
+  <div class="warnbox"><strong>为什么 H 阶段没暴露这个 bug?</strong> H 的读路径只用 <code>snap = MAX</code>。<code>lookup_key(uk, MAX)</code> 的 trailer = <code>be(0)</code>,<strong>严格小于</strong>所有真实版本的 <code>be(MAX-seq)</code>(seq&lt;MAX)——type 字节根本轮不到比较,seek 必落到最新版本。一到<strong>有限快照</strong>(J),lookup 的 <code>be(MAX-snap)</code> 与 seq=snap 版本的 <code>be(MAX-snap)</code> <strong>相等</strong>,type 成了 tiebreaker:墓碑(type 0)排在 <code>TYPE_VALUE(1)</code> 的 lookup 之前 → seek 跳过它 → 删除"读不出来"。把 lookup 的 type 降到 0 即修。<strong>潜伏 bug 常被"某个参数恰好让它不发作"掩盖,换参数空间(MAX→有限)才现形——这也是为什么 J 的快照测试是 H 墓碑逻辑的真正试金石。</strong></p>
+
+  <h3>代码 2 — snapshot + get_as_of(engine.rs)</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">snapshot</span>(&self) -> Seq { self.seq }   <span class="c">// 独占上界:已写全可见,未来不可见</span>
+
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;Value&gt; {
+        self.<span class="f">get_as_of</span>(key, self.seq)              <span class="c">// "读最新" = 在当前快照下读</span>
+    }
+
+    <span class="k">pub fn</span> <span class="f">get_as_of</span>(&self, key: &[u8], snapshot: Seq) -> Option&lt;Value&gt; {
+        <span class="k">if</span> snapshot == 0 { <span class="k">return</span> None; }            <span class="c">// 空快照:无可见版本</span>
+        <span class="k">let</span> snap = snapshot - 1;                    <span class="c">// get_newest 是 seq<=snap;snap=snapshot-1 ⇔ seq<snapshot</span>
+        <span class="k">if let</span> Some((t, v)) = self.mem.<span class="f">get_newest</span>(key, snap) { <span class="k">return</span> (t == TYPE_VALUE).<span class="f">then_some</span>(v); }
+        <span class="k">for</span> m <span class="k">in</span> &self.imm { <span class="k">if let</span> Some((t, v)) = m.<span class="f">get_newest</span>(key, snap) { <span class="k">return</span> (t==TYPE_VALUE).<span class="f">then_some</span>(v); } }
+        <span class="k">for</span> r <span class="k">in</span> &self.ssts { <span class="k">if let</span> Some((t, v)) = r.<span class="f">get_newest</span>(key, snap) { <span class="k">return</span> (t==TYPE_VALUE).<span class="f">then_some</span>(v); } }
+        None
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">逐层 <code>get_newest(uk, snap)</code> 各自只返回"本源里 seq≤snap 的最新版本"。第一个有<strong>可见版本</strong>的源即给出该快照下的最新——若高优先级源只有 seq&gt;snap 的(不可见)版本,<code>get_newest</code> 自然返回 None,继续往下层找。所以历史快照能<strong>穿过</strong>较新的不可见写,落到当时的旧值。这正是 <code>snapshot_survives_flush</code> 里"v2 已写但快照仍读 v1"的机制。</p>
+
+  <h2>🧰 Coding style:参数化代替写死 · off-by-one 先定方向 · 修 bug 连根</h2>
+  <ul>
+    <li><strong>把策略做成参数</strong>:H 把 <code>snap</code> 一路带到 <code>get_newest</code> 却恒传 MAX——等于"为参数化预留接口,先用默认值"。J 接上真参数,几乎零改。<strong>预见到"将来要可变"的维度,先做成参数留 MAX/默认,比日后重构便宜得多。</strong></li>
+    <li><strong>off-by-one 先定不等号</strong>:快照可见性 <code>seq &lt; snapshot</code>(独占)一旦定死,传给 <code>lower_bound</code> 的 <code>snapshot-1</code> 和 <code>snapshot==0</code> 的早退都顺势推出。<strong>边界 bug 的根治是先把语义不等号写在注释里,再推实现值</strong>,而非反过来试。</li>
+    <li><strong>修 bug 要连根、并补能复现的测试</strong>:lookup_key 的 type bug 不是"J 新引入",是 H1 潜伏、J 暴露。修在根上(internal_key),并让 J 的快照测试成为它的回归网。<strong>潜伏 bug 修复后,要留一个"会触发它的参数"的测试钉住</strong>。</li>
+  </ul>
+
+  <h2>🧠 System mindset:快照隔离 = 读一个不动的过去</h2>
+  <p>MVCC 的精髓:<strong>读者读一个固定版本号下的一致视图,写者照常往前写,二者互不阻塞</strong>。没有读写锁、没有读等写——读拿快照号过滤,写追加更大 seq。这套"<strong>多版本 + 版本号可见性</strong>"是现代数据库并发控制的主流:</p>
+  <table>
+    <thead><tr><th>系统</th><th>快照是什么</th></tr></thead>
+    <tbody>
+      <tr><td>RocksDB</td><td>一个 sequence number(本课同款)+ 阻止 compaction 回收它需要的旧版本</td></tr>
+      <tr><td>PostgreSQL</td><td>事务可见性快照(xmin/xmax + 活跃事务集)</td></tr>
+      <tr><td>Git</td><td>一个 commit hash —— 整棵树的不可变快照</td></tr>
+      <tr><td>时序/分析库</td><td>读到某个 watermark 之前的全部数据</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:要"一致地读一个变动中的系统",别去锁住它,而是<strong>给它的状态打版本号、读一个固定版本</strong>。代价是旧版本要保留到没有快照需要它为止——这就引出<strong>快照与 GC/compaction 的协调</strong>(谁还引用着最老的快照,compaction 就不能丢早于它的版本)。我们 MVP 单线程、不主动回收,所以暂不涉及;但真实系统里"快照引用计数 ↔ compaction 安全点"是核心一环(Tier 3 会再碰)。</p>
+
+  <h2>🧪 Harness 系统:时间旅行三问</h2>
+  <div class="harness">
+    <div class="kicker">三条性质</div>
+    <p style="margin:.3em 0 0">① <strong>读历史</strong>:put v1 → 抓 s1 → put v2 → 抓 s2 → delete。<code>get</code>=None(最新已删),<code>get_as_of(s2)</code>=v2,<code>get_as_of(s1)</code>=v1。一条线验三个时间点。② <strong>跨 flush</strong>:抓快照后把新旧版本都 flush 进 SST,历史快照仍读到旧值(版本进哪层不影响可见性,只看 seq)。③ <strong>未来不可见</strong>:空引擎抓 s0 → 之后 put,<code>get_as_of(s0)</code>=None。盯死"独占上界 + 空快照"边界。</p>
+  </div>
+
+  <h3>代码 3 — harness(engine.rs tests)</h3>
+  <pre>    <span class="c">#[test]</span> <span class="c">// 时间旅行</span>
+    <span class="k">fn</span> <span class="f">snapshot_time_travel</span>() {
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v1"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();   <span class="k">let</span> s1 = e.<span class="f">snapshot</span>();
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v2"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();   <span class="k">let</span> s2 = e.<span class="f">snapshot</span>();
+        e.<span class="f">delete</span>(<span class="s">"k"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"k"</span>), None);                          <span class="c">// 最新 = 已删</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get_as_of</span>(b<span class="s">"k"</span>, s2).<span class="f">as_deref</span>(), Some(&b<span class="s">"v2"</span>[..]));
+        <span class="f">assert_eq!</span>(e.<span class="f">get_as_of</span>(b<span class="s">"k"</span>, s1).<span class="f">as_deref</span>(), Some(&b<span class="s">"v1"</span>[..]));
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 跨 flush 仍有效</span>
+    <span class="k">fn</span> <span class="f">snapshot_survives_flush</span>() {
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v1"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>(); <span class="k">let</span> s1 = e.<span class="f">snapshot</span>();
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v2"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>(); e.<span class="f">flush</span>().<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get_as_of</span>(b<span class="s">"k"</span>, s1).<span class="f">as_deref</span>(), Some(&b<span class="s">"v1"</span>[..]));  <span class="c">// 穿过 v2 读 v1</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 未来不可见</span>
+    <span class="k">fn</span> <span class="f">snapshot_hides_future_writes</span>() {
+        <span class="k">let</span> s0 = e.<span class="f">snapshot</span>();                <span class="c">// 空引擎,s0 = 0</span>
+        e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"v"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get_as_of</span>(b<span class="s">"k"</span>, s0), None);   <span class="c">// s0 之后的写不可见</span>
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test snapshot</div>
+  <div class="done"><div class="kicker">J 判定 — 全绿 · Phase J 收官</div><p style="margin:.3em 0 0"><code>snapshot_time_travel ... ok</code> · <code>snapshot_survives_flush ... ok</code> · <code>snapshot_hides_future_writes ... ok</code><br>+ H 墓碑/覆盖/差分全部回归(lookup_key 修复后更稳)<br><strong>47 passed; 0 failed</strong></p></div>
+
+  <div class="milestone">🏁 <strong>Phase J 达成:点读有了时间旅行</strong>。<code>get_as_of(k, snapshot)</code> 读任意历史一致视图。但范围读 <code>scan</code> 还停在"读最新"——它用的是 H2 的 dedup MergeIterator,取的是全局最新版本,不认快照。<strong>Phase K</strong> 把范围读也升级成快照感知:一个对外的 <code>DBIter</code> 游标,按 snapshot 过滤版本 + 跳墓碑 + 按 user_key 去重。</p></div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">J 想透这几个</div>
+    <ol>
+      <li><strong>抓快照为什么是 O(1)、不拷数据?</strong>(快照只是记下一个 seq 数。数据本就多版本并存(只追加,旧版本没被删),所以"过去的视图"一直躺在那,读时按 seq 过滤即可,无需在抓快照时复制任何东西。<strong>多版本存储让"快照"退化成一个数</strong>——这是 LSM/MVCC 比"拷贝整库"高明的地方。)</li>
+      <li><strong>历史快照怎么"穿过"较新的写读到旧值?</strong>(逐层 <code>get_newest(uk, snap)</code>:高优先级源若只有 seq&gt;snap 的新版本,它返回 None(那版本不可见),于是继续往低层找,直到某层有 seq≤snap 的版本。所以新写不会挡住旧快照——它们 seq 太大,被过滤掉了。)</li>
+      <li><strong>为什么 lookup_key 的 type 必须最小?和墓碑什么关系?</strong>(同一个 seq 上,墓碑 type 0 排在 value type 1 前。若被删 key 在 seq=snap 处是墓碑,lookup 用 type 1 会排在它后面 → lower_bound 跳过墓碑 → 删除在该快照下"读不出来"、旧值复活。type 取 0 让 lookup 排在该 seq 任何条目前/相等,墓碑不被跳过。<strong>这个 bug 在 snap=MAX 下永不发作,是 J 的有限快照才逼出来的——参数空间扩大是发现潜伏 bug 的常见途径。</strong>)</li>
+      <li><strong>旧版本能一直留着吗?</strong>(不能,会涨爆空间。但<strong>有快照引用</strong>的旧版本不能被回收(否则该快照读到空)。所以真实系统把"最老的活跃快照 seq"当 compaction 的安全水位:早于它、且被新版本遮蔽的旧值才能丢。我们 MVP 不回收,所以不涉及;Tier 3 compaction 会正面处理"快照安全点"。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase K — 对外范围扫描(快照 + 墓碑感知).</strong> 把 G2 的 <code>scan</code> 升级成一个真正的对外游标 <code>DBIter</code>:底层 <code>MergeIterator</code> 吐<strong>所有版本</strong>(不在归并层去重),上层 <code>DBIter</code> 按 <code>snapshot</code> 过滤 seq、按 user_key 取最新可见版本、跳墓碑。<code>scan_as_of(start, end, snapshot)</code> 就是范围版的时间旅行。这也终于把"去重 + 快照 + 墓碑"从 MergeIterator 里拆出来,放回它该在的 DBIter 层(对标 RocksDB 的分工)。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/snapshot_impl.h">snapshot_impl.h</a> · <a href="https://github.com/facebook/rocksdb/blob/main/db/db_iter.cc">db_iter.cc</a>(下一站 K)。</p>
+    <p>想完跟我对答案,或说"继续 Phase K"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

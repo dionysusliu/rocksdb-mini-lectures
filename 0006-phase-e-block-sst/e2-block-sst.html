@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E2 · block-based SST + 稀疏索引</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="e1-block-format.html">← E1</a> &nbsp;·&nbsp; <a href="index.html">Phase E</a> &nbsp;·&nbsp; E2 &nbsp;·&nbsp; <a href="e3-bench.html">E3 →</a></div>
+
+  <div class="kicker">STEP E2 · Phase E block-based SST</div>
+  <h1>block-based SST + 稀疏索引</h1>
+  <p>用 E1 的块拼出完整 SST。<code>SstBuilder</code> 把 entry 攒进当前块,超 <code>BLOCK_SIZE</code> 就<strong>封口</strong>成一个 data block、往稀疏索引记一条 <code>(块末键, BlockHandle)</code>;<code>finish</code> 写出 <code>[data blocks][index block][footer]</code>。<code>SstReader::open</code> 只载入<strong>稀疏索引</strong>(小);<code>get</code> 二分索引定位<strong>唯一候选块</strong>、用 <code>read_exact_at</code> <strong>只读那一块</strong>。读放大从 Phase D 的 O(整文件) 降到 O(一块)。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">重写 <code>sst.rs</code>:新增 <code>BlockHandle{offset,len}</code>;<code>SstBuilder</code> 攒块 + 超阈值 <code>flush_block</code> + 稀疏索引;<code>finish</code> 写三段式文件;<code>SstReader</code> 持 <code>File</code> + 稀疏索引,<code>get</code> <code>partition_point</code> 定位候选块、<code>read_block</code> 只读一块。对外签名 <strong>与 Phase D 一致</strong>(<code>new/add/finish/open/get</code>),所以 <code>engine.rs</code> 一行不改。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 差分 vs <code>BTreeMap</code>(强制多块)绿;<strong>读放大不变量</strong>(一次点查 <code>blocks_read</code> 增量 ≤ 1)绿;<strong>跨块边界键</strong>(每块首/末键命中)绿;<strong>引擎旧测试全过</strong>。</p>
+  </div>
+
+  <h3>三段式文件 + 稀疏索引(格式锚)</h3>
+  <svg viewBox="0 0 700 150" font-family="ui-monospace,monospace" font-size="11">
+    <rect x="10" y="20" width="90" height="34" fill="#e8f0e0" stroke="#7a9a5a"/><text x="55" y="41" text-anchor="middle" fill="#3a5a2a">data block0</text>
+    <rect x="102" y="20" width="90" height="34" fill="#e8f0e0" stroke="#7a9a5a"/><text x="147" y="41" text-anchor="middle" fill="#3a5a2a">data block1</text>
+    <rect x="194" y="20" width="90" height="34" fill="#e8f0e0" stroke="#7a9a5a"/><text x="239" y="41" text-anchor="middle" fill="#3a5a2a">data block2</text>
+    <rect x="300" y="20" width="240" height="34" fill="#f4f1e8" stroke="#c9a25a"/><text x="420" y="41" text-anchor="middle" fill="#8a5a12">index block(每块一条:末键→handle)</text>
+    <rect x="548" y="20" width="142" height="34" fill="#fcf3ee" stroke="#c98a6a"/><text x="619" y="41" text-anchor="middle" fill="#7a3b2e">footer 24B</text>
+    <text x="619" y="72" text-anchor="middle" fill="#888" font-size="10">idx_off·idx_len·magic</text>
+    <text x="10" y="100" fill="#888">索引项 = (块的末键, BlockHandle{offset:u64, len:u64})。index block 本身也复用 BlockBuilder 编码。</text>
+    <text x="10" y="122" fill="#888">读:footer → 载入 index block → 二分(末键 ≥ key 的第一块)→ read_exact_at 只读那一块 → 块内二分。</text>
+  </svg>
+  <p><strong>为什么索引项存"块的末键"?</strong> 稀疏索引每块只留一个 key 当"路标"。存<strong>末键</strong>(块内最大 key)后,查找就是"找<strong>第一个末键 ≥ target</strong> 的块"——因为块按 key range 不重叠且升序,target 若存在,必在这一块里(它 ≤ 该块末键,且 &gt; 前一块末键)。这正是 RocksDB <code>IndexBuilder::AddIndexEntry(last_key_in_current_block, ...)</code> 的语义。</p>
+  <span class="src">table/block_based/index_builder.h:80 AddIndexEntry(last_key_in_current_block, ...)  ·  table/format.h:53 class BlockHandle  ·  table/block_based/flush_block_policy.cc:50 return curr_size >= block_size_</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>在 <code>sst.rs</code> 顶部引入 <code>block::{Block, BlockBuilder}</code>、<code>FileExt</code>、<code>AtomicU64</code>;加 <code>BlockHandle</code>(「代码 1」)。</li>
+    <li>重写 <code>SstBuilder</code>(「代码 2」):字段换成 <code>block + index + block_size</code>;<code>add</code> 攒块+超阈值 <code>flush_block</code>;<code>finish</code> 写三段式。</li>
+    <li>重写 <code>SstReader</code>(「代码 3」):持 <code>File</code> + 稀疏 <code>index</code> + <code>blocks_read</code> 仪表;<code>open</code> 只载索引;<code>get</code> 定位候选块 + <code>read_block</code> 只读一块。</li>
+    <li>敲入「代码 4」的 harness,<code>cargo test</code> 全绿(含 engine 旧测试)。</li>
+  </ol>
+
+  <h3>代码 1 — 引入 + <code>BlockHandle</code></h3>
+  <pre><span class="k">use</span> crate::block::{Block, BlockBuilder};
+<span class="k">use</span> anyhow::{Result, bail};
+<span class="k">use</span> bytes::Bytes;
+<span class="k">use</span> std::fs::File;
+<span class="k">use</span> std::io::Write;
+<span class="k">use</span> std::os::unix::fs::FileExt; <span class="c">// read_exact_at:&self 即可按偏移随机读(免整文件载入)</span>
+<span class="k">use</span> std::path::Path;
+<span class="k">use</span> std::sync::atomic::{AtomicU64, Ordering};
+
+<span class="k">const</span> MAGIC: u64 = 0x6d696e695f737374; <span class="c">// "mini_sst"</span>
+<span class="k">const</span> FOOTER_LEN: usize = 24;
+<span class="k">const</span> BLOCK_SIZE: usize = 4096; <span class="c">// 默认块阈值 ~4KB;测试用 with_block_size 调小强制多块</span>
+
+<span class="c">/// 定位一个块在文件里的位置:偏移 + 长度。RocksDB 的 BlockHandle 同义。</span>
+<span class="c">#[derive(Clone, Copy, Debug)]</span>
+<span class="k">pub struct</span> <span class="t">BlockHandle</span> { <span class="k">pub</span> offset: u64, <span class="k">pub</span> len: u64 }
+<span class="k">impl</span> <span class="t">BlockHandle</span> {
+    <span class="k">fn</span> <span class="f">encode</span>(&self, buf: &<span class="k">mut</span> Vec&lt;u8&gt;) {
+        buf.<span class="f">extend_from_slice</span>(&self.offset.<span class="f">to_le_bytes</span>());
+        buf.<span class="f">extend_from_slice</span>(&self.len.<span class="f">to_le_bytes</span>());
+    }
+    <span class="k">fn</span> <span class="f">decode</span>(b: &[u8]) -> Self {
+        Self {
+            offset: u64::<span class="f">from_le_bytes</span>(b[0..8].<span class="f">try_into</span>().<span class="f">unwrap</span>()),
+            len: u64::<span class="f">from_le_bytes</span>(b[8..16].<span class="f">try_into</span>().<span class="f">unwrap</span>()),
+        }
+    }
+}</pre>
+
+  <h3>代码 2 — <code>SstBuilder</code>(攒块 + 稀疏索引)</h3>
+  <pre><span class="k">pub struct</span> <span class="t">SstBuilder</span> {
+    data: Vec&lt;u8&gt;,                    <span class="c">// 已封口的 data blocks(累积)</span>
+    block: BlockBuilder,              <span class="c">// 当前正在攒的块</span>
+    index: Vec&lt;(Bytes, BlockHandle)&gt;, <span class="c">// 稀疏索引:每块一条 (末键, handle)</span>
+    last_key: Option&lt;Bytes&gt;,          <span class="c">// 升序校验 + 当前块的末键</span>
+    block_size: usize,
+}
+<span class="k">impl</span> <span class="t">SstBuilder</span> {
+    <span class="k">pub fn</span> <span class="f">new</span>() -> Self { Self::<span class="f">with_block_size</span>(BLOCK_SIZE) }
+    <span class="k">pub fn</span> <span class="f">with_block_size</span>(block_size: usize) -> Self {
+        Self { data: Vec::new(), block: BlockBuilder::<span class="f">new</span>(), index: Vec::new(), last_key: None, block_size }
+    }
+
+    <span class="k">pub fn</span> <span class="f">add</span>(&<span class="k">mut</span> self, key: &[u8], val: &[u8]) -> Result&lt;()&gt; {
+        <span class="k">if let</span> Some(last) = &self.last_key && key &lt;= last.<span class="f">as_ref</span>() {
+            <span class="f">bail!</span>(<span class="s">"SstBuilder.add 非升序: {:?} &lt;= {:?}"</span>, key, last);
+        }
+        self.block.<span class="f">add</span>(key, val);
+        self.last_key = Some(Bytes::<span class="f">copy_from_slice</span>(key));
+        <span class="k">if</span> self.block.<span class="f">estimated_size</span>() &gt;= self.block_size { self.<span class="f">flush_block</span>(); } <span class="c">// 块满 → 封口</span>
+        Ok(())
+    }
+
+    <span class="c">/// 把当前块封口写入 data 区,并把(末键, handle)记进稀疏索引。空块跳过。</span>
+    <span class="k">fn</span> <span class="f">flush_block</span>(&<span class="k">mut</span> self) {
+        <span class="k">if</span> self.block.<span class="f">is_empty</span>() { <span class="k">return</span>; }
+        <span class="k">let</span> block = std::mem::<span class="f">take</span>(&<span class="k">mut</span> self.block).<span class="f">finish</span>();
+        <span class="k">let</span> offset = self.data.<span class="f">len</span>() <span class="k">as</span> u64;
+        <span class="k">let</span> len = block.<span class="f">len</span>() <span class="k">as</span> u64;
+        self.data.<span class="f">extend_from_slice</span>(&block);
+        <span class="k">let</span> last = self.last_key.<span class="f">clone</span>().<span class="f">unwrap</span>(); <span class="c">// 此刻 last_key 正是本块末键</span>
+        self.index.<span class="f">push</span>((last, BlockHandle { offset, len }));
+    }
+
+    <span class="k">pub fn</span> <span class="f">finish</span>(<span class="k">mut</span> self, path: &Path) -> Result&lt;()&gt; {
+        self.<span class="f">flush_block</span>(); <span class="c">// 收尾:最后一个未满块也封口</span>
+        <span class="k">let</span> <span class="k">mut</span> f = File::<span class="f">create</span>(path)?;
+        f.<span class="f">write_all</span>(&self.data)?;
+        <span class="k">let</span> index_offset = self.data.<span class="f">len</span>() <span class="k">as</span> u64;
+        <span class="k">let</span> <span class="k">mut</span> ib = BlockBuilder::<span class="f">new</span>();   <span class="c">// 索引块复用 BlockBuilder</span>
+        <span class="k">let</span> <span class="k">mut</span> hb = Vec::<span class="f">with_capacity</span>(16);
+        <span class="k">for</span> (k, h) <span class="k">in</span> &self.index { hb.<span class="f">clear</span>(); h.<span class="f">encode</span>(&<span class="k">mut</span> hb); ib.<span class="f">add</span>(k, &hb); }
+        <span class="k">let</span> index_block = ib.<span class="f">finish</span>();
+        f.<span class="f">write_all</span>(&index_block)?;
+        <span class="k">let</span> <span class="k">mut</span> footer = Vec::<span class="f">with_capacity</span>(FOOTER_LEN);
+        footer.<span class="f">extend_from_slice</span>(&index_offset.<span class="f">to_le_bytes</span>());
+        footer.<span class="f">extend_from_slice</span>(&(index_block.<span class="f">len</span>() <span class="k">as</span> u64).<span class="f">to_le_bytes</span>());
+        footer.<span class="f">extend_from_slice</span>(&MAGIC.<span class="f">to_le_bytes</span>());
+        f.<span class="f">write_all</span>(&footer)?;
+        f.<span class="f">sync_all</span>()?;
+        Ok(())
+    }
+}
+<span class="k">impl</span> <span class="t">Default</span> <span class="k">for</span> <span class="t">SstBuilder</span> { <span class="k">fn</span> <span class="f">default</span>() -> Self { Self::<span class="f">new</span>() } }</pre>
+  <div class="warnbox"><strong><code>std::mem::take</code> 是封块的关键招.</strong> <code>flush_block</code> 要"取走当前 builder、换个空的继续攒"。<code>std::mem::take(&amp;mut self.block)</code> 用 <code>Default</code> 造一个空 <code>BlockBuilder</code> 顶上去、把旧的<strong>move 出来</strong> <code>finish</code> 掉——这就是为什么 E1 给 <code>BlockBuilder</code> 实现了 <code>Default</code>。无需 <code>Option</code> 包裹、无需 clone。</div>
+
+  <h3>代码 3 — <code>SstReader</code>(只读候选块)</h3>
+  <pre><span class="c">/// 只在 open 时载入小小的稀疏索引;data block 在 get 时按需读取。</span>
+<span class="k">pub struct</span> <span class="t">SstReader</span> {
+    file: File,
+    index: Vec&lt;(Bytes, BlockHandle)&gt;, <span class="c">// 升序的 (块末键, handle)</span>
+    blocks_read: AtomicU64,           <span class="c">// 仪表:累计读了多少 data block(读放大佐证)</span>
+}
+<span class="k">impl</span> <span class="t">SstReader</span> {
+    <span class="k">pub fn</span> <span class="f">open</span>(path: &Path) -> Result&lt;Self&gt; {
+        <span class="k">let</span> file = File::<span class="f">open</span>(path)?;
+        <span class="k">let</span> file_len = file.<span class="f">metadata</span>()?.<span class="f">len</span>();
+        <span class="k">if</span> file_len &lt; FOOTER_LEN <span class="k">as</span> u64 { <span class="f">bail!</span>(<span class="s">"SST 太小,无 footer"</span>); }
+        <span class="k">let</span> <span class="k">mut</span> footer = [0u8; FOOTER_LEN];
+        file.<span class="f">read_exact_at</span>(&<span class="k">mut</span> footer, file_len - FOOTER_LEN <span class="k">as</span> u64)?;
+        <span class="k">let</span> index_offset = u64::<span class="f">from_le_bytes</span>(footer[0..8].<span class="f">try_into</span>()?);
+        <span class="k">let</span> index_len = u64::<span class="f">from_le_bytes</span>(footer[8..16].<span class="f">try_into</span>()?);
+        <span class="k">let</span> magic = u64::<span class="f">from_le_bytes</span>(footer[16..24].<span class="f">try_into</span>()?);
+        <span class="k">if</span> magic != MAGIC { <span class="f">bail!</span>(<span class="s">"magic 不符,非本格式 SST"</span>); }
+        <span class="k">let</span> <span class="k">mut</span> ibuf = <span class="f">vec!</span>[0u8; index_len <span class="k">as</span> usize]; <span class="c">// 只读索引块,不读整文件</span>
+        file.<span class="f">read_exact_at</span>(&<span class="k">mut</span> ibuf, index_offset)?;
+        <span class="k">let</span> index_block = Block::<span class="f">decode</span>(Bytes::<span class="f">from</span>(ibuf));
+        <span class="k">let</span> <span class="k">mut</span> index = Vec::<span class="f">with_capacity</span>(index_block.<span class="f">len</span>());
+        <span class="k">for</span> i <span class="k">in</span> 0..index_block.<span class="f">len</span>() {
+            <span class="k">let</span> (k, v) = index_block.<span class="f">entry_at</span>(i);
+            index.<span class="f">push</span>((Bytes::<span class="f">copy_from_slice</span>(k), BlockHandle::<span class="f">decode</span>(v)));
+        }
+        Ok(Self { file, index, blocks_read: AtomicU64::<span class="f">new</span>(0) })
+    }
+
+    <span class="k">fn</span> <span class="f">read_block</span>(&self, h: BlockHandle) -> Result&lt;Block&gt; {
+        <span class="k">let</span> <span class="k">mut</span> buf = <span class="f">vec!</span>[0u8; h.len <span class="k">as</span> usize];
+        self.file.<span class="f">read_exact_at</span>(&<span class="k">mut</span> buf, h.offset)?;
+        self.blocks_read.<span class="f">fetch_add</span>(1, Ordering::Relaxed);
+        Ok(Block::<span class="f">decode</span>(Bytes::<span class="f">from</span>(buf)))
+    }
+
+    <span class="c">/// 点查:二分稀疏索引找唯一候选块(末键 ≥ key 的第一块),只读那一块,块内再二分。</span>
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;Bytes&gt; {
+        <span class="k">let</span> idx = self.index.<span class="f">partition_point</span>(|(last, _)| last.<span class="f">as_ref</span>() &lt; key);
+        <span class="k">let</span> (_, handle) = self.index.<span class="f">get</span>(idx)?; <span class="c">// idx 越界 = key 大于所有末键 → miss,不读块</span>
+        <span class="k">let</span> block = self.<span class="f">read_block</span>(*handle).<span class="f">ok</span>()?;
+        block.<span class="f">get</span>(key).<span class="f">map</span>(Bytes::<span class="f">copy_from_slice</span>) <span class="c">// 点查边界拷出;零拷贝迭代在 Phase F</span>
+    }
+
+    <span class="k">pub fn</span> <span class="f">num_blocks</span>(&self) -> usize { self.index.<span class="f">len</span>() }
+    <span class="k">pub fn</span> <span class="f">blocks_read</span>(&self) -> u64 { self.blocks_read.<span class="f">load</span>(Ordering::Relaxed) }
+}</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>engine.rs</code> 调的还是 <code>SstBuilder::new/add/finish</code> 和 <code>SstReader::open/get</code>——签名全没变,所以<strong>引擎一行不改</strong>。块化彻底封装在 SST 模块边界内,这是"深模块、窄接口"的实证。</p>
+
+  <h2>🧰 Coding style:newtype 句柄 · partition_point(lower_bound)· 仪表化 &amp;self</h2>
+  <ul>
+    <li><strong>newtype 句柄(BlockHandle)</strong>:不用裸 <code>(u64,u64)</code> 元组到处传,而是给"块的位置"一个<strong>有名字的类型</strong>。它把 <code>offset/len</code> 绑成一个不可拆的概念,<code>encode/decode</code> 收在一处,误传两个无关的 u64 直接编译不过。这是"为领域概念造类型"的范式(对比 Phase A 的 <code>Key=Bytes</code> 别名——句柄更进一步,有自己的方法)。</li>
+    <li><strong><code>partition_point</code> = lower_bound</strong>:<code>index.partition_point(|(last,_)| last &lt; key)</code> 返回<strong>第一个不满足谓词</strong>的下标,即"第一个末键 ≥ key 的块"。这正是 C++ <code>std::lower_bound</code>。比手写二分边界(±1 off-by-one 重灾区)安全得多。记住这个映射:<strong>"找第一个 ≥ x" = partition_point(&lt; x)</strong>。</li>
+    <li><strong>仪表化但保持 <code>&amp;self</code></strong>:<code>blocks_read</code> 用 <code>AtomicU64</code> 而非 <code>u64</code>,所以 <code>read_block</code> 能在 <code>&amp;self</code>(共享只读)下自增计数——读路径不需要 <code>&amp;mut</code>。这既服务测试(读放大断言),也预演了真引擎里 <code>&amp;self</code> 并发读 + 原子统计计数器(命中率、IO 次数)的常见形态。<strong>"在不可变接口下做可变统计",原子量是标准答案。</strong></li>
+  </ul>
+
+  <h2>🧠 System mindset:稀疏索引 · 读放大 · 按需 IO 而非全载</h2>
+  <p>这一步真正改变的是<strong>读的成本结构</strong>。两件事值得拎出来跨域看:</p>
+  <table>
+    <thead><tr><th>概念</th><th>本阶段怎么做 / 它在别处长什么样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>稀疏索引</strong></td><td>每块只留一个路标(末键),索引大小 = O(块数) 而非 O(条数)。同构于:B-tree 内部节点只存<strong>分隔键</strong>不存数据、数据库的<strong>稀疏索引</strong>(每数据页一个索引项)、Kafka 的 <code>.index</code>(每若干条消息一个 offset→物理位置)、视频文件的<strong>关键帧索引</strong>。</td></tr>
+      <tr><td><strong>读放大</strong></td><td>为读一个 key 实际搬了多少字节。Phase D:整文件;Phase E:一块(~4KB)。LSM 三大放大(读/写/空间)里,读放大是这条线的主角;后续 bloom(Phase 后期)让 miss <strong>连块都不读</strong>、block cache(Phase S)让热块<strong>不重复读盘</strong>。</td></tr>
+      <tr><td><strong>按需 IO(<code>read_exact_at</code>)</strong></td><td>不再 <code>read_to_end</code> 把整文件吸进内存,而是按 (offset,len) <strong>随机读</strong>。这就是 <code>pread(2)</code>;真引擎更进一步用 <strong>mmap</strong> 或 io_uring。"<strong>只为需要的字节付 IO</strong>"是所有大文件随机访问系统(数据库、视频点播 seek、分页加载)的共同信条。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:稀疏索引是一个<strong>空间/读放大的对冲</strong>。索引越稀疏(块越大)→ 索引越省内存,但每次点查搬的块越大。"<strong>用一个常驻内存的小索引,把一次大文件随机查,变成一次小块 IO</strong>"——这个模式在你做任何"大文件 + 随机查"的系统时都会重演。</p>
+
+  <h2>🧪 Harness 系统:读放大不变量(性能契约可执行化)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">差分(vs BTreeMap)只能证明"<strong>结果对</strong>",证明不了"<strong>读得省</strong>"——一个把整文件载入再二分的实现,差分照样全绿。但 Phase E 的<strong>全部价值</strong>就在"读得省"。于是我们给 <code>SstReader</code> 埋一个 <code>blocks_read</code> 计数器,把性能契约钉成断言:<strong>无论文件被切成多少块,一次点查 <code>blocks_read</code> 的增量最多是 1;查一个大于所有键的 miss,增量是 0(索引直接判空,一块都不碰)。</strong>这类"断言资源消耗量级"的 harness(数 IO 次数 / 分配次数 / SQL 查询数),是把"快"从口号变成回归测试的关键——它能抓住"功能没坏但悄悄退化成全表扫描"这种最阴险的性能回归(ORM 的 N+1 查询就是被这种测试抓的)。</p>
+  </div>
+
+  <h3>代码 4 — harness(<code>sst.rs</code> 的 <code>#[cfg(test)] mod tests</code>)</h3>
+  <pre>    <span class="c">// 读放大不变量:无论多少块,一次点查最多读一个 data block。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">point_get_reads_one_block</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"amp.sst"</span>);
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">with_block_size</span>(16); <span class="c">// 小阈值 → 多块</span>
+        <span class="k">for</span> i <span class="k">in</span> 0..200u32 { b.<span class="f">add</span>(format!(<span class="s">"k{i:04}"</span>).<span class="f">as_bytes</span>(), b<span class="s">"payload-data"</span>).<span class="f">unwrap</span>(); }
+        b.<span class="f">finish</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="f">assert!</span>(r.<span class="f">num_blocks</span>() &gt; 1, <span class="s">"应被切成多块"</span>);
+
+        r.<span class="f">get</span>(b<span class="s">"k0100"</span>).<span class="f">unwrap</span>(); <span class="f">assert_eq!</span>(r.<span class="f">blocks_read</span>(), 1); <span class="c">// 命中:读 1 块</span>
+        r.<span class="f">get</span>(b<span class="s">"k0150"</span>).<span class="f">unwrap</span>(); <span class="f">assert_eq!</span>(r.<span class="f">blocks_read</span>(), 2); <span class="c">// 再 1 块(累计 2)</span>
+        r.<span class="f">get</span>(b<span class="s">"k0100x"</span>);          <span class="f">assert_eq!</span>(r.<span class="f">blocks_read</span>(), 3); <span class="c">// miss(块内不存在):仍读 1 块</span>
+        r.<span class="f">get</span>(b<span class="s">"zzzz"</span>);            <span class="f">assert_eq!</span>(r.<span class="f">blocks_read</span>(), 3); <span class="c">// miss(越界):一块都不读</span>
+    }
+
+    <span class="c">// 边界:逐块首键/末键都要命中(稀疏索引 partition_point 的临界点)。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">cross_block_boundary_keys</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"bnd.sst"</span>);
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">with_block_size</span>(40); <span class="c">// 每块约 3 条</span>
+        <span class="k">let</span> keys: Vec&lt;String&gt; = (0..30).<span class="f">map</span>(|i| format!(<span class="s">"k{i:03}"</span>)).<span class="f">collect</span>();
+        <span class="k">for</span> k <span class="k">in</span> &keys { b.<span class="f">add</span>(k.<span class="f">as_bytes</span>(), b<span class="s">"v"</span>).<span class="f">unwrap</span>(); }
+        b.<span class="f">finish</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="f">assert!</span>(r.<span class="f">num_blocks</span>() &gt; 1);
+        <span class="k">for</span> k <span class="k">in</span> &keys { <span class="f">assert_eq!</span>(r.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">as_deref</span>(), Some(&b<span class="s">"v"</span>[..]), <span class="s">"{k}"</span>); }
+    }
+
+    <span class="c">// 差分:随机有序输入,SST.get == BTreeMap.get(强制多块)。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">matches_btreemap_oracle</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"o.sst"</span>);
+        <span class="k">let</span> <span class="k">mut</span> model = BTreeMap::<span class="f">new</span>();
+        <span class="k">for</span> i <span class="k">in</span> 0..500u32 { model.<span class="f">insert</span>(format!(<span class="s">"key{:05}"</span>, i * 7 % 1000), format!(<span class="s">"val{}"</span>, i)); }
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">with_block_size</span>(64); <span class="c">// 多块</span>
+        <span class="k">for</span> (k, v) <span class="k">in</span> &model { b.<span class="f">add</span>(k.<span class="f">as_bytes</span>(), v.<span class="f">as_bytes</span>()).<span class="f">unwrap</span>(); }
+        b.<span class="f">finish</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="f">assert!</span>(r.<span class="f">num_blocks</span>() &gt; 1);
+        <span class="k">for</span> (k, v) <span class="k">in</span> &model { <span class="f">assert_eq!</span>(r.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">as_deref</span>(), Some(v.<span class="f">as_bytes</span>())); }
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"nope"</span>), None);
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">参考实现还含 <code>build_open_roundtrip</code>(单块)、<code>rejects_unsorted</code>(升序不变量)、<code>multi_block_split</code>(阈值=1,每条一块)。一并敲上。</p>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">E2 判定 — 全绿</div><p style="margin:.3em 0 0"><code>sst::tests::point_get_reads_one_block ... ok</code><br><code>sst::tests::cross_block_boundary_keys ... ok</code><br><code>sst::tests::matches_btreemap_oracle ... ok</code><br><code>sst::tests::multi_block_split ... ok</code><br>+ <code>engine::tests::*</code> 全部回归通过(引擎未改,块化对它透明)<br><strong>17 passed; 0 failed</strong></p></div>
+
+  <h2>🔄 CI/CD:块大小矩阵(同数据多分块跑差分)</h2>
+  <p>Phase D 的三档(test/integration/lint)不变。E2 值得加的不是新 job,而是一种<strong>参数化测试</strong>意识:同一组数据,用 <code>block_size ∈ {1, 16, 64, 4096}</code> 各跑一遍差分,证明"<strong>格式在任意分块下都自洽</strong>"——单块、每条一块、正常多块,三种极端都不能露馅。我们的 <code>multi_block_split</code>(阈值 1)+ <code>build_open_roundtrip</code>(默认大阈值=单块)+ <code>matches_btreemap_oracle</code>(阈值 64)已经手动覆盖了这个矩阵。在 CI 里这等价于一个 <code>matrix: block_size: [1,16,64,4096]</code>。</p>
+  <pre><span class="c"># .github/workflows/ci.yml — 可选:把块大小做成矩阵(示意)</span>
+  <span class="t">block-matrix</span>:
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">strategy</span>:
+      <span class="t">matrix</span>: { block_size: [1, 16, 64, 4096] }
+    <span class="t">steps</span>:
+      - <span class="t">uses</span>: actions/checkout@v4
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+      - <span class="t">run</span>: cargo test sst:: -- --nocapture
+        <span class="c"># 真要参数化需把 block_size 经 env 注入测试;此处示意 CI 弧线的下一步</span></pre>
+  <p style="font-size:.9em;color:var(--soft)"><strong>CI/CD 弧线</strong>:C 搭 test→lint→cache,D 加测试分层(单元 vs 集成),E 引入<strong>参数化/矩阵</strong>意识,M5 再扩多平台 + 覆盖率。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">E2 想透这几个</div>
+    <ol>
+      <li><strong>miss 仍要读一块</strong>:查一个<strong>落在某块 key range 内、但实际不存在</strong>的 key(如 <code>k0100x</code>),我们仍读了一整块才发现没有。一个 SST 上百万次 miss 点查,这是巨大浪费。哪个结构能让我们"<strong>读块之前</strong>"就以高概率否定?(提示:per-SST 或 per-block 的 <strong>bloom filter</strong>。它怎么做到"说没有就一定没有、说有可能误报"?)</li>
+      <li><strong>稀疏索引常驻 vs 多级索引</strong>:<code>open</code> 把整个稀疏索引读进内存常驻。一个 1TB 的 SST、4KB 块,有 ~2.5 亿块,索引本身就几个 GB——还能全常驻吗?RocksDB 的 <strong>partitioned index</strong> 怎么解?(提示:把索引<strong>本身也切成块</strong>,再加一层顶层索引——索引的索引。这和我们 data block 的关系,是不是很像?)</li>
+      <li><strong>每次 get 重读块的浪费</strong>:同一个热块被 1000 次点查命中,我们 <code>read_exact_at</code> 了 1000 次(虽然 OS page cache 可能挡掉真实磁盘 IO)。<code>blocks_read</code> 会数到 1000。哪个组件该把<strong>解析好的 Block</strong> 缓存在用户态,省掉重复 decode?(Phase S:<strong>block cache</strong>,一个 LRU。想想它的 key 该是什么——文件号 + 块 offset?)</li>
+      <li><strong>点查拷出 vs 迭代零拷贝</strong>:<code>SstReader::get</code> 最后 <code>Bytes::copy_from_slice</code> 把 value 拷出来了——因为块是 <code>get</code> 内的局部变量,函数返回时块就 drop 了,借入它的切片活不过函数边界。E1 的零拷贝在这里<strong>没兑现</strong>。Phase F 的迭代器怎么改变这一点?(提示:迭代器<strong>持有</strong>当前块,只要迭代器活着,块就活着,<code>value() -&gt; &amp;[u8]</code> 就能一路借下去。零拷贝的收益要在<strong>批量迭代</strong>时才真正显现,而非单次点查。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:E3 — 基准 flat vs block 的 A/B.</strong> 块化"快了多少、省了多少"还只是声称。E3 把 Phase D 扁平 SST 和现在的块化 SST 放进<strong>同一个二进制</strong>,同种子同负载实测<strong>磁盘 / 索引内存 / 冷热读延迟</strong>(对标 <code>db_bench</code>)。你会看到块化在<strong>磁盘(~15%)+ 索引内存(24×)+ 冷选择性读(可达 33×)</strong>上赢,却在<strong>热点查上略输</strong>——这条诚实的对照,正好给出 E4(前缀压缩)、E5(块尾 CRC+压缩)以及更远的 Phase S(block cache)的<strong>动机</strong>。再往后 Phase F 用迭代器兑现 E1 埋下的零拷贝。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_based_table_builder.cc">block_based_table_builder.cc</a>(<code>Flush(first_key_in_next_block)</code> :1669,按块封口)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/index_builder.h">index_builder.h</a>(<code>AddIndexEntry</code> :80,索引存末键)· <a href="https://github.com/facebook/rocksdb/blob/main/table/format.h">format.h</a>(<code>class Footer</code> :236)。</p>
+    <p>想完跟我对答案,或说"继续 Phase F"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

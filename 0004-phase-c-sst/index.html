@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase C · SST — mini-LSM 自建引擎</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.2em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:34px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:23px;margin:2.2em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:18px;margin:1.6em 0 .4em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2);text-decoration:none;border-bottom:1px solid #bcd}
+  a:hover{background:#eef4f8}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:19px;color:#333}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:16px 20px;margin:1.4em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:4px;font-size:.95em}
+  .cards{display:grid;gap:14px;margin:1.2em 0}
+  .card{display:block;border:1px solid var(--rule);border-radius:6px;padding:18px 20px;background:#fff;color:var(--ink)}
+  .card:hover{border-color:var(--accent);box-shadow:0 3px 14px rgba(0,0,0,.06)}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;color:var(--accent);letter-spacing:.1em}
+  .card h3{margin:.2em 0 .3em;color:var(--ink)}
+  .card p{margin:.2em 0;font-size:.92em;color:var(--soft)}
+  .meta{font-family:ui-monospace,monospace;font-size:.78em;color:var(--soft);margin-top:.6em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:12px 18px;border-radius:6px;font-size:.92em}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0003-phase-b-wal/index.html">Phase B</a> &nbsp;·&nbsp; Phase C</div>
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0004</div>
+  <h1>Phase C — SST</h1>
+  <p class="lede">把冻结的 MemTable 倒成一个<strong>有序、不可变的磁盘文件</strong>。从此数据有了一个能二分查找、能被 compaction 合并的持久形态——这是 LSM 里 "SS" (Sorted String) 的由来。</p>
+
+  <div class="mission">
+    <strong>Mission 锚点.</strong> WAL(Phase B)让数据持久,但它是<strong>无序追加</strong>——查一个 key 得重放全部。
+    SST 把数据按 key 排好、写成只读文件。还记得 A3 那个 <code>is_full()</code> "满了"信号吗?它就是 <strong>flush 的触发器</strong>:满 → 冻结 → 倒成 SST。
+    对标 RocksDB 的 <code>BlockBasedTable</code> + flush job。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">本 Lab 宣称的 GOAL</div>
+    <p style="margin:.4em 0 0">交付 <code>src/sst.rs</code>(<code>SstBuilder</code> + <code>SstReader</code>)与 <code>Engine::flush</code>:</p>
+    <ol style="margin:.4em 0">
+      <li><strong>有序落盘</strong>:MemTable 的内容按 key 升序写成一个自描述的 SST 文件(data + index + footer)。</li>
+      <li><strong>可点查</strong>:重新打开 SST,二分索引,O(log n) 读到任意 key 的 value,无需载入全部 value。</li>
+      <li><strong>flush 闭环</strong>:<code>Engine::flush</code> 把当前 MemTable 倒成 SST、清空内存表、截断 WAL。</li>
+    </ol>
+    <p style="margin:.4em 0 0"><strong>Done when:</strong> <code>cargo test</code> 全绿,含格式 round-trip、二分差分、flush 闭环三类 harness。</p>
+  </div>
+
+  <div class="mission" style="background:#fbf6ee;border-color:#e0c890">
+    <strong>本 Lab 起,每节课五块.</strong> 除 🎯Goal+代码 与 🧪Harness 外,新增三支柱(可迁移收获,引擎之外):
+    🧰 <strong>Coding style</strong>(编程范式)· 🧠 <strong>System mindset</strong>(跨域到 Linux/存储/网络/算法/HPC 的系统思维)· 🔄 <strong>CI/CD</strong>(逐课搭真流水线)。
+    总览见 <a href="../roadmap.html">路线图的"五块 + 三条横切学习弧"</a>。
+  </div>
+
+  <h3>一图看清这一步</h3>
+  <svg viewBox="0 0 700 150" font-family="ui-monospace,monospace" font-size="12">
+    <rect x="10" y="40" width="150" height="70" rx="6" fill="#f4f1e8" stroke="#aaa"/>
+    <text x="85" y="32" text-anchor="middle" fill="#888">MemTable(满/冻结)</text>
+    <text x="85" y="62" text-anchor="middle" fill="#555">banana→yellow</text>
+    <text x="85" y="80" text-anchor="middle" fill="#555">apple→green</text>
+    <text x="85" y="98" text-anchor="middle" fill="#888" font-size="10">内存,跳表有序</text>
+    <line x1="160" y1="75" x2="210" y2="75" stroke="#7a3b2e" stroke-width="2" marker-end="url(#a)"/>
+    <text x="185" y="68" text-anchor="middle" fill="#7a3b2e" font-size="11">flush</text>
+    <rect x="210" y="30" width="200" height="90" rx="6" fill="#fcf3ee" stroke="#7a3b2e" stroke-width="2"/>
+    <text x="310" y="22" text-anchor="middle" fill="#7a3b2e" font-weight="bold">SST 文件(本 Lab)</text>
+    <rect x="222" y="40" width="176" height="20" rx="3" fill="#e8f0e0" stroke="#b8d0a0"/><text x="310" y="54" text-anchor="middle" font-size="10">data: apple|banana (升序)</text>
+    <rect x="222" y="64" width="176" height="20" rx="3" fill="#e0ecf5" stroke="#a8c4e0"/><text x="310" y="78" text-anchor="middle" font-size="10">index: key→offset</text>
+    <rect x="222" y="88" width="176" height="20" rx="3" fill="#fde8e0" stroke="#e0a890"/><text x="310" y="102" text-anchor="middle" font-size="10">footer: offsets + magic</text>
+    <line x1="410" y1="75" x2="460" y2="75" stroke="#999" stroke-dasharray="4" marker-end="url(#a)"/>
+    <rect x="460" y="55" width="110" height="40" rx="6" fill="#fff" stroke="#2e5d7a"/>
+    <text x="515" y="73" text-anchor="middle" fill="#2e5d7a">get(k)</text>
+    <text x="515" y="88" text-anchor="middle" fill="#888" font-size="10">二分 index</text>
+    <text x="600" y="60" fill="#888" font-size="10">Phase D:</text>
+    <text x="600" y="76" fill="#888" font-size="10">接进</text>
+    <text x="600" y="92" fill="#888" font-size="10">Engine.get</text>
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#999"/></marker></defs>
+  </svg>
+
+  <h2>路线：三个最小步</h2>
+  <div class="cards">
+    <a class="card" href="c1-sst-builder.html">
+      <div class="step">STEP C1</div>
+      <h3>SstBuilder — 有序写盘</h3>
+      <p>设计 SST 文件布局(data/index/footer),<code>add</code> 按升序追加,<code>finish</code> 落盘。对标 table_builder.cc。</p>
+      <div class="meta">harness 系统：<strong>格式稳定性 / round-trip</strong></div>
+    </a>
+    <a class="card" href="c2-sst-reader.html">
+      <div class="step">STEP C2</div>
+      <h3>SstReader — 二分点查</h3>
+      <p>读 footer → 载入 index → 二分查 key → 读 value。对标 block_based_table_reader.cc。</p>
+      <div class="meta">harness 系统：<strong>差分(vs BTreeMap)+ 边界</strong></div>
+    </a>
+    <a class="card" href="c3-flush.html">
+      <div class="step">STEP C3</div>
+      <h3>Engine::flush — 倒表闭环</h3>
+      <p>冻结 MemTable → SstBuilder → 文件;清空内存表、截断 WAL。对标 flush job。</p>
+      <div class="meta">harness 系统：<strong>跨持久化边界 round-trip</strong></div>
+    </a>
+  </div>
+
+  <h2>本 Lab 的 harness 主题：文件格式的可信</h2>
+  <p>SST 是<strong>磁盘格式</strong>——它要被另一次进程、另一个版本、甚至另一台机器读回。格式 bug(偏移算错、字节序、footer 写歪)是静默的、迟发的。新增两类侧重:</p>
+  <table>
+    <thead><tr><th>Harness 系统</th><th>抓什么</th><th>用在</th></tr></thead>
+    <tbody>
+      <tr><td><strong>格式稳定性 / round-trip</strong></td><td>build→read 回来必须逐字节等价;footer magic / offset 自洽;空值/空键/边界键</td><td>C1/C2</td></tr>
+      <tr><td><strong>跨持久化边界 round-trip</strong></td><td>flush 前 MemTable 的逻辑内容 == flush 后 SST 读回的内容(含覆盖写取最新)</td><td>C3</td></tr>
+    </tbody>
+  </table>
+
+  <div class="ask">
+    <strong>带着这个问题进 C1</strong>:SST 为什么必须<strong>有序</strong>?如果乱序写,(a) 点查、(b) 范围扫描、(c) 两个 SST 做 compaction 归并,分别会贵多少?(这三点正是 "Sorted" 在 SSTable 里值钱的原因。)
+  </div>
+
+  <div class="foot">
+    <p><strong>前置.</strong> Phase A(<code>memtable.rs</code>,需要新增一个有序 <code>iter()</code>)+ Phase B(<code>wal.rs</code>/<code>engine.rs</code>)就位、<code>cargo test</code> 绿。本 Lab 新增 <code>sst.rs</code>,并扩展 <code>engine.rs</code> 与 <code>memtable.rs</code>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/wiki/Rocksdb-BlockBasedTable-Format">Wiki: BlockBasedTable Format</a> ·
+       <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_builder.cc">block_builder.cc</a> ·
+       <a href="https://skyzh.github.io/mini-lsm/week1-01-memtable.html">skyzh mini-lsm Week 1</a>(SST 章)。</p>
+    <p><strong>卡住了问我.</strong></p>
+  </div>
+</div>
+</body>
+</html>

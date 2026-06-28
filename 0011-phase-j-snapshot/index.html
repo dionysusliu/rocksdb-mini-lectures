@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J · 快照 — get_as_of(snapshot) 时间旅行</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../0010-phase-h-internalkey/index.html">← Phase H</a> &nbsp;·&nbsp; Phase J</div>
+
+  <div class="kicker">TIER 2 · PHASE J</div>
+  <h1>快照 — get_as_of(snapshot) 时间旅行</h1>
+  <p>H 让每个版本带上 seq。读路径处处用 <code>snap = Seq::MAX</code>(读最新)。Phase J 只做一件事:把那个写死的 snap <strong>参数化</strong>。于是有了 <strong>MVCC 时间旅行</strong>——抓一个快照号,之后无论怎么写、怎么删,拿这个快照读到的永远是"<strong>抓快照那一刻的一致视图</strong>"。这就是数据库"可重复读"、"一致性备份"、"长事务读"的地基。本课聚焦<strong>点读</strong>(<code>get_as_of</code>);范围读的快照版(对外 scan 游标)是 Phase K。</p>
+
+  <p style="font-size:.92em;color:var(--soft)"><strong>几乎零新代码——这正是 H 设计对的回报。</strong> <code>get_newest(uk, snap)</code> 在 H2 就带了 <code>snap</code> 参数;<code>lookup_key(uk, snap)</code> 在 H1 就支持任意 snap。J 只是不再恒传 MAX,而是传一个捕获的快照号。<strong>把"读哪个版本"做成一个参数,而非写死,是 J 能一行落地的全部秘密。</strong></p>
+
+  <h2>一个最小步</h2>
+  <p>本阶段是单课:<a href="j-snapshot.html"><strong>J — snapshot() + get_as_of</strong></a>。</p>
+  <ul>
+    <li><code>Engine::snapshot() -&gt; Seq</code>:抓当前序列号(独占上界)。</li>
+    <li><code>get_as_of(key, snapshot)</code>:只看 <code>seq &lt; snapshot</code> 的版本;<code>get</code> = <code>get_as_of(key, self.seq)</code>。</li>
+    <li>顺手修一个 H1 潜伏的 <code>lookup_key</code> seek-type bug(snap=MAX 时被掩盖,有限快照才现形)。</li>
+  </ul>
+
+  <div class="ask"><strong>承接 Phase K.</strong> J 把<strong>点读</strong>参数化成快照。K 把<strong>范围读</strong>也参数化:对外 <code>scan</code> 游标(seek/next 流式),按 snapshot 过滤版本 + 跳墓碑 + 按 user_key 去重 —— 即 RocksDB 的 <code>DBIter</code>。K 收尾后,整个引擎的读路径(点 + 范围)都是快照一致 + 墓碑感知的,M2 多版本引擎达成。</div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/snapshot_impl.h">snapshot_impl.h</a> · <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl.cc">GetImpl(snapshot seq)</a>。</p>
+    <p>从 <a href="j-snapshot.html">J — snapshot + get_as_of</a> 开始。</p>
+  </div>
+</div>
+</body>
+</html>

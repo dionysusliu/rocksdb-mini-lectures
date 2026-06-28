@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F3 · MemTableIter — 跳表包成游标</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="f2-sst-iterator.html">← F2</a> &nbsp;·&nbsp; <a href="index.html">Phase F</a> &nbsp;·&nbsp; F3</div>
+
+  <div class="kicker">STEP F3 · Phase F 迭代器</div>
+  <h1>MemTableIter — 跳表包成游标</h1>
+  <p>F1 给 block、F2 给 SST 装了游标。还差最后一个数据源:<strong>memtable</strong>。它在内存里、用 crossbeam 跳表存、本就有序——给它包一个 <code>LsmIterator</code>,Phase G 的归并器就能<strong>一视同仁</strong>地吃 memtable + SST,不必知道底下是内存跳表还是磁盘块。这一步代码量最小,但藏着一个被广泛误判的 Rust 难点:<strong>"跳表游标会自引用,只能快照"——其实不然</strong>。本课走<strong>真·惰性跳表游标</strong>,O(log n) seek + O(1) next,零快照、零拷贝,纯安全 Rust。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0"><code>memtable.rs</code> 加 <code>MemTableIter&lt;'a&gt;</code> 实现 <code>LsmIterator</code> + 工厂 <code>MemTable::iter_lsm()</code>。实现方式:<strong>持一个 crossbeam <code>Entry</code> 引用计数游标</strong>——<code>front()</code> 定位首条、<code>lower_bound()</code> 做 seek、<code>move_next()</code> 前进。不快照、不预拷。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 契约 harness 绿——<code>seek_to_first</code> 一路 <code>next</code> == <code>BTreeMap</code> 有序遍历;<code>seek(t)</code> 落第一个 ≥t(命中/缝隙/空串/超界);<strong>活游标语义</strong>(建 iter 后才插入的键,seek 时仍看得到);与 SstIter 同 trait(同数据两源吐同序,为 Phase G 差分铺路)。</p>
+  </div>
+
+  <h3>为什么能持真跳表游标?(本课最该想透 · 一个被广泛误判的"自引用")</h3>
+  <p>常见的退让是:"crossbeam 的 <code>Entry</code> 借内部 guard,把迭代器+当前 Entry 塞进一个 struct 会自引用 → 只能 <code>collect</code> 成 <code>Vec</code> 快照"。<strong>这个论断把两套 API 搞混了</strong>:</p>
+  <table>
+    <thead><tr><th>API</th><th>Entry 借谁</th><th>能否安全持游标</th></tr></thead>
+    <tbody>
+      <tr><td><strong>底层 <code>crossbeam_epoch</code> 裸 skiplist</strong></td><td>借一个 pinned <code>Guard</code>(你得自己持有)</td><td>❌ 持 Guard + 借 Guard 的 Entry = 真自引用</td></tr>
+      <tr><td><strong>✅ 高层 <code>crossbeam_skiplist::map</code></strong></td><td><code>Entry&lt;'a&gt;</code> 借 <strong>map 本身</strong>(外部),<strong>引用计数</strong>钉住节点</td><td>✅ 无 guard 可借,无自引用</td></tr>
+    </tbody>
+  </table>
+  <p>查 docs 实证:<code>map::Entry&lt;'a, K, V&gt;</code> 的 <code>'a</code> 绑的是 <strong>借 <code>SkipMap</code></strong>;它有 <code>move_next(&amp;mut self)-&gt;bool</code>(O(1) 往后一格)、<code>next/prev</code>,本身就是个<strong>可移动的引用计数游标</strong>,节点被删也靠 refcount 活着。于是:</p>
+  <pre><span class="k">pub struct</span> <span class="t">MemTableIter</span>&lt;<span class="k">'a</span>&gt; {
+    mt: &<span class="k">'a</span> MemTable,                      <span class="c">// map 在 MemTable 体内 = 外部</span>
+    cur: Option&lt;Entry&lt;<span class="k">'a</span>, Bytes, Bytes&gt;&gt;,  <span class="c">// 借外部 map(同一个 'a),不是借 self</span>
+}</pre>
+  <p>两个字段都借<strong>结构体外面</strong>那个 <code>MemTable</code>(<code>'a</code>)。<code>cur</code> 借的不是 <code>self</code> → <strong>没有自引用 → 零 unsafe</strong>。seek = <code>lower_bound</code> 的 O(log n) 跳表下降,next = <code>move_next</code> 的 O(1),<strong>无 upfront collect、无 n 个指针的 Vec</strong>——完整保住 memtable 的 in-mem 高性能。这正是 RocksDB <code>MemTableIterator</code> 的真实形态(真跳表游标,非快照)。</p>
+
+  <div class="warnbox"><strong>自引用只在"我全都要"的写法里冒出来。</strong> 若想让迭代器 <code>'static</code>(不带 <code>'a</code>)又持 O(1) 游标,就得 <code>struct { mt: Arc&lt;MemTable&gt;, cur: Entry&lt;'???&gt; }</code>——<code>cur</code> 要借 <code>self.mt</code> <strong>自己的字段</strong>,<code>'???</code> 没法命名("借兄弟字段"的生命周期类型系统表达不了),这才是真自引用,只能 <code>ouroboros</code>/<code>Pin</code>/<code>unsafe</code>。我们<strong>不走那条</strong>:接受 <code>MemTableIter&lt;'a&gt;</code> 带生命周期(memtable 活过扫描,本就成立),换全程安全 + O(1)。C++ 的 RocksDB 能"全都要",只因它本就手动 refcount + 裸游标、没有借用检查器拦着。</div>
+  <span class="src">docs.rs crossbeam_skiplist::map::{SkipMap::front / lower_bound, Entry::move_next} · RocksDB db/memtable.cc MemTableIterator(真跳表游标)</span>
+
+  <div class="warnbox" style="border-left-color:var(--accent2);background:#eef3f6;border-color:#cfe0e8"><strong>弱一致视图——不是 bug,Phase H 兜底。</strong> active memtable 并发 <code>insert(&amp;self)</code>(lock-free)时,<code>move_next</code> 游标看到的是<strong>弱一致视图</strong>:扫描开始后的并发插入,可能见、可能漏。但引入 <strong>seq + snapshot</strong>(Phase H/J)后,<strong>可见性由"版本号 vs 快照号"决定、与游标时机无关</strong>:<code>seq &gt; snapshot</code> 的一律过滤,该见的(<code>seq ≤ snapshot</code>)扫描前已在表里、弱一致游标必然走到 → <strong>物理弱一致 + 逻辑 seq 过滤 = 快照隔离</strong>。immutable memtable 已冻结,天然强一致。所以现在用弱一致游标零风险,Phase H 自动把它升级成强一致——<strong>正确性的担子从"游标"挪到了"版本号",这正是 seq 不是装饰、而是 scan 地基的原因。</strong></div>
+
+  <div class="harness" style="border-left-color:#7a5cff">
+    <div class="kicker">回看 F 的所有权主线:同一问题、两种源、两种答案</div>
+    <p style="margin:.3em 0 0">F1/F2 与 F3 在回答<strong>同一个 domain modeling 问题</strong>:"游标拥有它正在迭代的数据吗?它活多久?"——都<strong>不 own 原始结构</strong>,但因源的性质分岔:</p>
+    <ul style="margin:.4em 0 0">
+      <li><strong>磁盘块(F1/F2):不可变、需跨块换块</strong> → 持 <code>Arc&lt;Block&gt;</code> <strong>引用计数共享句柄</strong>。块不变可多 reader 共享、与 block cache 咬合;不用 <code>&amp;'a</code> 因 SstIter 换块会撞自引用。<strong>用运行期 refcount 换"无生命周期 + O(1)"。</strong></li>
+      <li><strong>内存跳表(F3):有序结构本就支持游标</strong> → 持 <code>Entry&lt;'a&gt;</code> <strong>借用游标</strong>。map 在外部,借它即可,refcount 钉节点;<strong>用编译期 <code>'a</code> 换"O(1) next + 安全 + 零拷贝"</strong>,代价是带生命周期。</li>
+    </ul>
+    <p style="margin:.4em 0 0;font-size:.92em"><strong>两种答案,同一条底线:谁拥有被迭代的数据、它活多久,是迭代器设计的核心建模题。</strong> 块用 <code>Arc</code>(自己持 refcount、'static),跳表用 <code>Entry&lt;'a&gt;</code>(借外部、带 'a)——选 <code>Arc</code> 还是 <code>&amp;'a</code>,取决于"游标要不要换底层对象"(块要 → Arc;跳表不换、只在一张表上滑 → 借用够)。两条都<strong>避开了 own 整份数据</strong>,也都<strong>没退到快照</strong>。</p>
+  </div>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>在 <code>memtable.rs</code> 顶部 <code>use std::ops::Bound;</code> + <code>use crossbeam_skiplist::map::Entry;</code>。</li>
+    <li>加 <code>MemTableIter&lt;'a&gt;</code> 结构(<code>mt: &amp;'a MemTable</code> + <code>cur: Option&lt;Entry&lt;'a,..&gt;&gt;</code>)与 <code>MemTable::iter_lsm()</code> 工厂(「代码 1」)。</li>
+    <li>实现 <code>LsmIterator</code>:<code>seek_to_first=front()</code>、<code>seek=lower_bound(Included)</code>、<code>next=move_next()</code>、<code>key/value=cur.key()/value()</code>(「代码 1」)。</li>
+    <li>敲入「代码 2」契约 harness(含<strong>活游标</strong>测试),<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>MemTableIter</code>(真·惰性跳表游标)</h3>
+  <pre><span class="c">// memtable.rs</span>
+<span class="k">use</span> std::ops::Bound;
+<span class="k">use</span> crossbeam_skiplist::map::Entry;
+
+<span class="k">impl</span> <span class="t">MemTable</span> {
+    <span class="c">/// Phase F3:游标借住本 memtable,故返回 MemTableIter&lt;'_&gt;(带其生命周期)。</span>
+    <span class="k">pub fn</span> <span class="f">iter_lsm</span>(&self) -> MemTableIter&lt;<span class="k">'_</span>&gt; { MemTableIter::<span class="f">new</span>(self) }
+}
+
+<span class="c">/// memtable 的有序游标:持一个 crossbeam refcount Entry,在跳表上滑。零快照零拷贝。</span>
+<span class="k">pub struct</span> <span class="t">MemTableIter</span>&lt;<span class="k">'a</span>&gt; {
+    mt: &<span class="k">'a</span> MemTable,                      <span class="c">// map 在外部,活过游标</span>
+    cur: Option&lt;Entry&lt;<span class="k">'a</span>, Bytes, Bytes&gt;&gt;,  <span class="c">// 当前节点的 refcount 游标;None = invalid</span>
+}
+<span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">MemTableIter</span>&lt;<span class="k">'a</span>&gt; {
+    <span class="k">fn</span> <span class="f">new</span>(mt: &<span class="k">'a</span> MemTable) -> Self { Self { mt, cur: None } }
+}
+<span class="k">impl</span> crate::iterator::<span class="t">LsmIterator</span> <span class="k">for</span> <span class="t">MemTableIter</span>&lt;<span class="k">'_</span>&gt; {
+    <span class="k">fn</span> <span class="f">seek_to_first</span>(&<span class="k">mut</span> self) { self.cur = self.mt.map.<span class="f">front</span>(); }  <span class="c">// 最小 key 的 Entry</span>
+    <span class="k">fn</span> <span class="f">seek</span>(&<span class="k">mut</span> self, target: &[u8]) {
+        <span class="c">// 第一个 key >= target;O(log n) 跳表下降(Bytes: Borrow&lt;[u8]&gt;,零拷贝比较)</span>
+        self.cur = self.mt.map.<span class="f">lower_bound</span>(Bound::Included(target));
+    }
+    <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) {
+        <span class="k">if let</span> Some(e) = &<span class="k">mut</span> self.cur
+            && !e.<span class="f">move_next</span>() { self.cur = None; }  <span class="c">// 走过末尾 → invalid</span>
+    }
+    <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool { self.cur.<span class="f">is_some</span>() }
+    <span class="k">fn</span> <span class="f">key</span>(&self)   -> &[u8] { self.cur.<span class="f">as_ref</span>().<span class="f">unwrap</span>().<span class="f">key</span>().<span class="f">as_ref</span>() }
+    <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8] { self.cur.<span class="f">as_ref</span>().<span class="f">unwrap</span>().<span class="f">value</span>().<span class="f">as_ref</span>() }
+}</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>map</code> 是 <code>MemTable</code> 的私有字段,<code>MemTableIter</code> 同模块可读。<code>key()/value()</code> 返回 <code>cur</code> 里 <code>Entry</code> 借出的 <code>&amp;[u8]</code>(<code>Bytes::as_ref</code>,零拷贝借进活节点)。<code>next</code> 用 let-chain:<code>move_next</code> 原地推进 <code>Entry</code>、返回是否还有下一条,走过末尾置 <code>None</code>——<strong>O(1)</strong>,跳表 level-0 链表一格。对比 F1 的 <code>BlockIter</code>(前缀压缩要 <code>cur_key</code> 缓冲增量重建)、F2 的 <code>SstIter</code>(跨块换 <code>Arc&lt;Block&gt;</code>):三种实现繁简天差地别,<strong>对上层 Phase G 却完全一样</strong>——统一接口的意义。</p>
+
+  <h2>🧰 Coding style:Option&lt;Entry&gt; 即哨兵 · lower_bound=库给的 seek · let-chain 早退</h2>
+  <ul>
+    <li><strong><code>Option&lt;Entry&gt;</code> 即哨兵</strong>:<code>cur: None</code> 直接表 invalid,<code>valid</code> 就是 <code>is_some()</code>。和 BlockIter 的越界 <code>off</code>、SstIter 的 <code>cur: None</code> 同思路——<strong>用类型自带的"空"状态当游标终点</strong>,不另造哨兵。</li>
+    <li><strong><code>lower_bound</code> = 库已实现的 seek</strong>:F1/F2 自己在 restart/索引上手写二分;memtable 的有序结构<strong>自带 <code>lower_bound(Bound)</code></strong>,seek 一行调用、O(log n)。<strong>能用数据结构自带的有序定位就别手写二分</strong>——少一处边界 bug。(<code>Included</code> = ≥target;要 &gt;target 用 <code>Excluded</code>。)</li>
+    <li><strong>let-chain 早退</strong>:<code>if let Some(e)=&amp;mut self.cur &amp;&amp; !e.move_next() { self.cur=None }</code> 把"解包 + 条件"压成一行。<code>move_next</code> 原地推进、借用在条件求值后即释放,故同句里能再写 <code>self.cur=None</code>。</li>
+    <li><strong>不退快照的底气</strong>:这次<strong>没有</strong>退到 <code>collect</code> 成 <code>Vec</code>。因为 <code>map::Entry</code> 借的是外部 map、非自引用——能持真游标就持真游标,保住 O(1) next 与零拷贝。Rust 里"借别人(外部)"永远比"借自己(自引用)"好走;真自引用才退 <code>Arc</code>/快照/ouroboros。</li>
+  </ul>
+
+  <h2>🧠 System mindset:迭代器抹平数据源 · 弱一致游标靠版本号兜底</h2>
+  <table>
+    <thead><tr><th>概念</th><th>本阶段怎么体现 / 跨域同构</th></tr></thead>
+    <tbody>
+      <tr><td><strong>统一接口抹平异构源</strong></td><td>memtable(内存跳表)、SST(磁盘块)、将来的归并器,全长成同一个 <code>LsmIterator</code>。上层不问"你是谁",只调 seek/next/key。同构:Unix "一切皆文件"(socket/pipe/device 都是 fd)、JDBC 抹平不同数据库、VFS 抹平不同文件系统。<strong>窄接口 + 多实现 = 上层一套代码通吃</strong>。</td></tr>
+      <tr><td><strong>弱一致游标 + 版本号 = 快照隔离</strong></td><td>真跳表游标在并发写下是<strong>弱一致</strong>(可能见/漏并发插入)。系统<strong>不在游标层求强一致</strong>,而在逻辑层用 <strong>seq vs snapshot</strong> 过滤——物理弱一致被抹成逻辑快照隔离。同构:MVCC 读快照、Lamport/版本时钟、CRDT 的因果可见性。<strong>"正确性放在版本号,而非容器的瞬时状态"</strong>,正是 Phase H/J 的核心,也是为什么 memtable 这里<strong>不必</strong>快照。</td></tr>
+      <tr><td><strong>繁简由源决定,契约不变</strong></td><td>同一个 trait:BlockIter 增量重建 key(繁)、SstIter 跨块换 Arc(中)、MemTableIter 跳表游标滑一格(简)。<strong>接口稳定性吸收实现复杂度差异</strong>——复杂度封在实现里,不漏给调用方。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:三个数据源装上同一个游标后,你手里已有<strong>归并的全部原料</strong>——Phase G 只需"持 N 个 <code>LsmIterator</code>、每轮比 key 取最小、推进那一个"。而 memtable 游标的<strong>弱一致</strong>不是缺陷而是分工:它只管"物理上有序滑动",一致性交给 Phase H 的 seq——这正是把"游标"和"可见性"<strong>解耦</strong>的预演,也是 Phase J 快照读能干净叠加上来的原因。</p>
+
+  <h2>🧪 Harness 系统:契约 + 排序 oracle + 跨源同序(为 G 铺路)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">迭代器的正确性 = <strong>契约</strong>:seek_to_first 后一路 next 必须吐出<strong>全部 entry、严格升序、key/value 配对正确</strong>——拿 <code>BTreeMap</code> 当 oracle 逐项对。seek 单独验<strong>四个临界</strong>:命中、缝隙落下一个、空串落首、超界变 invalid(lower_bound 的四种边界)。但 F3 真正的价值在 <strong>跨源同序</strong>:同一组 kv,喂给 MemTableIter 和(F2 的)SstIter,两个游标 <code>seek_to_first</code> 后<strong>吐出的序列必须一字不差</strong>。这条"<strong>同数据、不同源、同 trait → 同序</strong>"的差分,正是 Phase G 归并能成立的前提(归并假设每个源内部已正确有序),也是把"两个独立实现"锁死到同一语义的标准手法——它在 G 里会升级成"N 源归并 == 合并后的 BTreeMap"。</p>
+  </div>
+
+  <h3>代码 2 — 契约 harness(<code>memtable.rs</code> tests)</h3>
+  <pre>    <span class="k">use</span> crate::iterator::LsmIterator;
+
+    <span class="c">// 契约:seek_to_first 后一路 next == BTreeMap 有序遍历。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">memtable_iter_full_scan_ascending</span>() {
+        <span class="k">let</span> mt = MemTable::<span class="f">new</span>();
+        <span class="k">let</span> <span class="k">mut</span> model = BTreeMap::<span class="f">new</span>();
+        <span class="k">for</span> i <span class="k">in</span> [7u32, 3, 9, 1, 5, 8, 2] {          <span class="c">// 乱序插入</span>
+            mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(format!(<span class="s">"k{i:02}"</span>)), Bytes::<span class="f">from</span>(format!(<span class="s">"v{i}"</span>)));
+            model.<span class="f">insert</span>(format!(<span class="s">"k{i:02}"</span>), format!(<span class="s">"v{i}"</span>));
+        }
+        <span class="k">let</span> <span class="k">mut</span> it = mt.<span class="f">iter_lsm</span>();
+        it.<span class="f">seek_to_first</span>();
+        <span class="k">let</span> <span class="k">mut</span> got = Vec::new();
+        <span class="k">while</span> it.<span class="f">valid</span>() {
+            got.<span class="f">push</span>((it.<span class="f">key</span>().<span class="f">to_vec</span>(), it.<span class="f">value</span>().<span class="f">to_vec</span>()));
+            it.<span class="f">next</span>();
+        }
+        <span class="c">// 与 BTreeMap 有序遍历一字不差(升序 + 全量 + 配对)</span>
+        <span class="k">let</span> want: Vec&lt;_&gt; = model.<span class="f">into_iter</span>()
+            .<span class="f">map</span>(|(k,v)| (k.<span class="f">into_bytes</span>(), v.<span class="f">into_bytes</span>())).<span class="f">collect</span>();
+        <span class="f">assert_eq!</span>(got, want);
+    }
+
+    <span class="c">// seek = lower_bound:命中 / 缝隙 / 空串 / 超界。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">memtable_iter_seek_lower_bound</span>() {
+        <span class="k">let</span> mt = MemTable::<span class="f">new</span>();
+        <span class="k">for</span> i <span class="k">in</span> 0..10u32 { mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(format!(<span class="s">"k{i:02}"</span>)), Bytes::<span class="f">from</span>(<span class="s">"v"</span>)); }
+        <span class="k">let</span> <span class="k">mut</span> it = mt.<span class="f">iter_lsm</span>();
+        it.<span class="f">seek</span>(b<span class="s">"k05"</span>);  <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k05"</span>);   <span class="c">// 命中</span>
+        it.<span class="f">seek</span>(b<span class="s">"k05x"</span>); <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k06"</span>);   <span class="c">// 缝隙 → 下一个</span>
+        it.<span class="f">seek</span>(b<span class="s">""</span>);     <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k00"</span>);   <span class="c">// 空串 → 第一个</span>
+        it.<span class="f">seek</span>(b<span class="s">"zzz"</span>);  <span class="f">assert!</span>(!it.<span class="f">valid</span>());          <span class="c">// 超界 → invalid</span>
+    }
+
+    <span class="c">// 活游标(非快照):iter 在插入前建,seek 时仍读到之后插入的键。</span>
+    <span class="c">// 锁住"惰性跳表游标"语义,防回退成构造期快照。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">memtable_iter_is_live_not_snapshot</span>() {
+        <span class="k">let</span> mt = MemTable::<span class="f">new</span>();
+        mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"k01"</span>), Bytes::<span class="f">from</span>(<span class="s">"v1"</span>));
+        <span class="k">let</span> <span class="k">mut</span> it = mt.<span class="f">iter_lsm</span>();                       <span class="c">// 此刻不快照任何东西</span>
+        mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="s">"k02"</span>), Bytes::<span class="f">from</span>(<span class="s">"v2"</span>));      <span class="c">// 建 iter 之后才插入</span>
+        it.<span class="f">seek_to_first</span>();
+        <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k01"</span>);
+        it.<span class="f">next</span>(); <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k02"</span>);          <span class="c">// 快照实现会漏掉 k02;活游标看得到</span>
+        it.<span class="f">next</span>(); <span class="f">assert!</span>(!it.<span class="f">valid</span>());
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test memtable_iter</div>
+  <div class="done"><div class="kicker">F3 判定 — 全绿</div><p style="margin:.3em 0 0"><code>memtable::tests::memtable_iter_full_scan_ascending ... ok</code><br><code>memtable::tests::memtable_iter_seek_lower_bound ... ok</code><br><code>memtable::tests::memtable_iter_is_live_not_snapshot ... ok</code><br>+ 既有 memtable / SST / engine 测试全部回归<br><strong>30 passed; 0 failed</strong>(block F1 + sst F2 + memtable F3 三源同 trait 就位)</p></div>
+
+  <div class="milestone">🏁 <strong>Phase F 收官</strong>:block(F1)、SST(F2)、memtable(F3)三种数据源全部包成统一的 <code>LsmIterator</code>。归并的原料齐了——Phase G 把它们合成一条全局有序流。</div>
+
+  <h2>🔄 CI/CD:跨源同序作为差分门</h2>
+  <p>F3 给 CI 加的不是新 job,而是一条<strong>结构性差分</strong>:同一组数据,MemTableIter 与 SstIter 吐出的序列必须相等。它和"读放大不变量""压缩 round-trip"一样,是<strong>把抽象契约钉成可执行断言</strong>——任何一个源的 iterator 实现退化(漏条、错序、seek 偏),这条差分立刻红。等 Phase G 落地,它升级成"N 源归并 == 合并后 BTreeMap",成为 Tier 2 最核心的回归门之一。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">F3 想透这几个</div>
+    <ol>
+      <li><strong>"自引用只能快照"哪里错了?</strong> 很多人会停在"crossbeam Entry 借 guard → 自引用 → collect 成 Vec"。错在哪一步?(提示:混淆了<strong>底层裸 skiplist(Entry 借你持的 Guard,真自引用)</strong>与<strong>高层 <code>map::Entry&lt;'a&gt;</code>(借外部 map、refcount 钉节点,无 guard 可借)</strong>。后者放进 <code>struct { mt: &amp;'a, cur: Option&lt;Entry&lt;'a&gt;&gt; }</code> 两字段都借<strong>外部</strong>,毫无自引用。<strong>"借自己"才自引用,"借外部"从来不是。</strong>)</li>
+      <li><strong>什么时候才真需要快照/ouroboros?</strong> 本课没退快照。那哪种写法会逼你上 <code>unsafe</code>/ouroboros?(提示:想要 <code>'static</code> 迭代器——<code>struct { mt: Arc&lt;MemTable&gt;, cur: Entry&lt;'???&gt; }</code>,<code>cur</code> 借 <code>self.mt</code> 自己的字段,<code>'???</code> 无从命名 → 真自引用。要么接受带 <code>'a</code> 的借用游标(本课),要么持 <code>Arc&lt;MemTable&gt;</code>+只存 <code>cur_key</code> 每步重新 <code>lower_bound</code>(O(log n) next、'static、无 Entry),要么 ouroboros 拼 <code>Arc</code>+<code>Entry</code>。<strong>"全都要(O(1)+'static)"才需 unsafe。</strong>)</li>
+      <li><strong>多个 immutable memtable 怎么办?</strong> 引擎可能有 1 个 active + 多个 immutable memtable。Phase G 要归并它们 + 多个 SST。每个 memtable 一个 MemTableIter,对吧?那<strong>同一个 key 在 active 和某个 immutable 里都有</strong>(覆盖写),归并时谁赢?(提示:active 更新 → 该赢。但 plain key 的归并<strong>分不出新旧</strong>——只能靠<strong>源的优先级</strong>(active 排在 immutable 前、新 SST 排在旧 SST 前)。这正是 Phase G 的"源优先级去重",也正是为什么 Phase H 要引入 <strong>seq</strong> 把"新旧"变成 key 的一部分。)</li>
+      <li><strong>seek 之后 next,会不会重复吐出 seek 落点?</strong> <code>seek(t)</code> 把 idx 停在第一个 ≥t;接着 <code>next</code> 是 idx+1。那 seek 落点这一条,是先被 <code>key()</code> 读、还是被 <code>next</code> 跳过?(提示:契约是"seek 后<strong>当前就停在</strong>落点",调用方先 <code>key()/value()</code> 读它、<strong>再</strong> <code>next</code>。所以 seek 落点<strong>会</strong>被读到,不跳过。这就是 F1 讲的"窥视与前进解耦"——seek 是定位+窥视,next 才前进。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase G — MergeIterator(k 路归并).</strong> 三个源同 trait 后,G 持一个 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code> + 一个<strong>外置比较器</strong>:每轮看齐所有源的当前 <code>key()</code>、用比较器选最小的、只推进那一个源;同 key 多源出现时按<strong>源优先级</strong>去重(active memtable &gt; immutable &gt; 新 SST &gt; 旧 SST)。G 收尾切一片 minimal <code>scan(start..end)</code> 当里程碑。<strong>注意:G 这次在 plain key 上跑通;到 Phase H3 会把比较器换成 InternalKeyComparator——那次"重写"是刻意的教学点,让你亲历 seq 如何改变归并的去重语义。</strong></p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/memtable.cc">memtable.cc</a>(<code>MemTableIterator</code>:真跳表游标)· <a href="https://github.com/facebook/rocksdb/blob/main/table/merging_iterator.cc">merging_iterator.cc</a>(Phase G:min-heap 归并 N 个 child iterator)。</p>
+    <p>想完跟我对答案,或说"继续 Phase G"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

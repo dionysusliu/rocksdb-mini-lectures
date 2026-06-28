@@ -1,0 +1,32 @@
+# mini-LSM CI 参考实现 — Phase C 完整版
+# 放到 rocksdb-mini/.github/workflows/ci.yml
+# 已本地验证(在累积参考实现): YAML 合法 · cargo test --all 6 绿 · fmt --check 干净 · clippy -D warnings 干净
+#
+# 增量来历:
+#   C1 = test job (cargo test)
+#   C2 = lint job (fmt + clippy -D warnings)
+#   C3 = rust-cache 提速
+# 后续: Phase R/AF 加 benchmark 回归门; M5 加多平台矩阵 + 覆盖率
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all --verbose
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings

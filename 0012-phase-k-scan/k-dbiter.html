@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K · DBIter + scan_as_of</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">Phase K</a> &nbsp;·&nbsp; K</div>
+
+  <div class="kicker">STEP K · Phase K 对外范围扫描</div>
+  <h1>DBIter + scan_as_of — 范围读的时间旅行</h1>
+  <p>G2 的 <code>scan</code> 把"去重"塞进了 <code>MergeIterator</code>,取的是<strong>全局最新</strong>版本——不认快照。本课把这层语义拆出来,做成一个对外游标 <code>DBIter</code>,让范围读和点读一样能按任意快照读历史。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">新模块 <code>DBIter</code>:包 <code>MergeIterator::new</code>(吐<strong>所有</strong>版本),上层做 ① 快照过滤(<code>seq &lt; snapshot</code>)② 按 user_key 取最新可见版本去重 ③ 墓碑跳过。<code>Engine::scan_as_of(start, end, snapshot)</code> 用它;<code>scan</code> = <code>scan_as_of(.., self.seq)</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 范围读时间旅行(历史快照扫到当时视图,无视之后写/删);跨 flush 仍正确;<code>scan ≡ get</code> 在每个 key 上一致(随机交错 + 多快照对拍);既有 G/H/J 测试全回归。</p>
+  </div>
+
+  <h3>分工:MergeIterator 归并,DBIter 懂语义</h3>
+  <p>K 的核心不是新算法,是<strong>把三件事放回该在的层</strong>。回顾两层各自的职责:</p>
+  <table>
+    <thead><tr><th>层</th><th>职责</th><th>懂什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>MergeIterator</code>(底层)</td><td>纯 k 路归并,吐<strong>所有</strong>版本,顺序 = InternalKey 字节序(user_key 升、同 key seq 降)</td><td>只懂字节序。不去重、不懂 seq、不懂墓碑</td></tr>
+      <tr><td><code>DBIter</code>(本层)</td><td>① 快照过滤 ② user_key 去重 ③ 墓碑跳过</td><td>懂 seq、懂 type(value/deletion)</td></tr>
+    </tbody>
+  </table>
+  <div class="warnbox"><strong>为什么去重必须在 DBIter,不能留在 MergeIterator?</strong> 去重 = "同一个 user_key 只取最新可见版本"。但<strong>"最新可见"依赖快照</strong>:在快照 s 下,"最新"是 seq 最大且 <code>&lt; s</code> 的那个版本——不是全局最大。G2 在归并层去重时取的是堆顶(全局最新),这在没有快照时碰巧对;一旦要历史快照,归并层<strong>不懂 seq</strong>、无法判断"对这个快照哪个版本才算最新"。所以去重要上移到懂 seq 的 DBIter:它在一个 user_key 的整组版本里,跳过 <code>seq &gt;= snapshot</code> 的,取<strong>第一个</strong> <code>seq &lt; snapshot</code> 的(组内 seq 降序 → 第一个即最新可见)。</div>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>src/db_iter.rs</code>,实现 <code>DBIter</code>(「代码 1」),<code>lib.rs</code> 加 <code>pub mod db_iter;</code>。</li>
+    <li><code>engine.rs</code>:<code>scan_as_of</code> 用 DBIter,<code>scan</code> 转发(「代码 2」);imports 去掉 <code>MergeIterator</code>、加 <code>DBIter</code>。</li>
+    <li>敲入「代码 3」三条 harness,<code>cargo test</code> 全绿、<code>cargo clippy</code> 干净。</li>
+  </ol>
+
+  <h3>代码 1 — DBIter(db_iter.rs)</h3>
+  <pre>    <span class="k">pub struct</span> <span class="t">DBIter</span>&lt;<span class="t">'a</span>&gt; {
+        inner: MergeIterator&lt;<span class="t">'a</span>&gt;,
+        snapshot: ik::Seq,            <span class="c">// 独占上界:可见 iff version.seq < snapshot</span>
+        cur: Option&lt;(Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt;,  <span class="c">// 当前停留的 (user_key, value),owned</span>
+    }
+
+    <span class="k">impl</span>&lt;<span class="t">'a</span>&gt; <span class="t">DBIter</span>&lt;<span class="t">'a</span>&gt; {
+        <span class="k">pub fn</span> <span class="f">new</span>(sources: Vec&lt;Box&lt;<span class="k">dyn</span> LsmIterator + <span class="t">'a</span>&gt;&gt;, snapshot: ik::Seq) -> Self {
+            Self { inner: MergeIterator::<span class="f">new</span>(sources), snapshot, cur: None }
+        }
+
+        <span class="c">// 从 inner 当前位置起,推进到下一个"可吐"的 user_key(最新可见版本是 VALUE)。</span>
+        <span class="k">fn</span> <span class="f">advance</span>(&<span class="k">mut</span> self) {
+            <span class="k">while</span> self.inner.<span class="f">valid</span>() {
+                <span class="k">let</span> uk = ik::<span class="f">user_key</span>(self.inner.<span class="f">key</span>()).<span class="f">to_vec</span>();
+                <span class="k">let</span> <span class="k">mut</span> chosen: Option&lt;(u8, Vec&lt;u8&gt;)&gt; = None;
+                <span class="c">// 消费本 user_key 的整组版本(组内 seq 降序)</span>
+                <span class="k">while</span> self.inner.<span class="f">valid</span>() && ik::<span class="f">user_key</span>(self.inner.<span class="f">key</span>()) == uk.<span class="f">as_slice</span>() {
+                    <span class="k">if</span> chosen.<span class="f">is_none</span>() && ik::<span class="f">seq</span>(self.inner.<span class="f">key</span>()) &lt; self.snapshot {
+                        chosen = Some((ik::<span class="f">value_type</span>(self.inner.<span class="f">key</span>()), self.inner.<span class="f">value</span>().<span class="f">to_vec</span>()));
+                    }                                          <span class="c">// 第一个 seq<snapshot = 该快照下最新可见</span>
+                    self.inner.<span class="f">next</span>();
+                }
+                <span class="k">match</span> chosen {
+                    Some((t, v)) <span class="k">if</span> t == ik::TYPE_VALUE => { self.cur = Some((uk, v)); <span class="k">return</span>; }
+                    _ => {}                                    <span class="c">// 墓碑 / 无可见版本 → 跳过此 key</span>
+                }
+            }
+            self.cur = None;                                   <span class="c">// 扫完</span>
+        }
+    }
+
+    <span class="k">impl</span> <span class="t">LsmIterator</span> <span class="k">for</span> <span class="t">DBIter</span>&lt;<span class="t">'_</span>&gt; {
+        <span class="k">fn</span> <span class="f">seek</span>(&<span class="k">mut</span> self, target: &[u8]) {
+            <span class="c">// target 是 user_key;lookup_key(.., MAX) trailer 最小 → 落到该 user_key 组首</span>
+            self.inner.<span class="f">seek</span>(&ik::<span class="f">lookup_key</span>(target, ik::Seq::MAX));
+            self.<span class="f">advance</span>();
+        }
+        <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) { self.<span class="f">advance</span>(); }  <span class="c">// advance 已推过当前组</span>
+        <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool { self.cur.<span class="f">is_some</span>() }
+        <span class="k">fn</span> <span class="f">key</span>(&self) -> &[u8] { &self.cur.<span class="f">as_ref</span>().<span class="f">unwrap</span>().0 }   <span class="c">// 吐 user_key,非 InternalKey</span>
+        <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8] { &self.cur.<span class="f">as_ref</span>().<span class="f">unwrap</span>().1 }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>为什么 <code>cur</code> 要 owned(<code>Vec&lt;u8&gt;</code>)?</strong> 定位"该吐什么"必须把一个 user_key 的<strong>整组版本消费完</strong>(才能确认组内最新可见、且后续没有更高优先级覆盖)。消费完后 <code>inner</code> 已经移到下一组,原来的 key/value 切片失效——所以要在消费时<strong>拷一份</strong>存进 <code>cur</code>,<code>key()/value()</code> 才能稳定返回。这是"<strong>前瞻整组才能决定当前输出</strong>"型游标的通用代价(RocksDB DBIter 同样维护 <code>saved_key_</code> / <code>saved_value_</code>)。</p>
+
+  <h3>代码 2 — scan_as_of(engine.rs)</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">scan</span>(&self, start: &[u8], end: &[u8]) -> Vec&lt;(Key, Value)&gt; {
+        self.<span class="f">scan_as_of</span>(start, end, self.seq)   <span class="c">// "读最新" = 当前快照</span>
+    }
+
+    <span class="k">pub fn</span> <span class="f">scan_as_of</span>(&self, start: &[u8], end: &[u8], snapshot: Seq) -> Vec&lt;(Key, Value)&gt; {
+        <span class="k">let</span> <span class="k">mut</span> sources: Vec&lt;Box&lt;<span class="k">dyn</span> LsmIterator + <span class="t">'_</span>&gt;&gt; = Vec::<span class="f">new</span>();
+        sources.<span class="f">push</span>(Box::<span class="f">new</span>(self.mem.<span class="f">iter_lsm</span>()));       <span class="c">// 源顺序 = 优先级降序,与 get 一致</span>
+        <span class="k">for</span> m <span class="k">in</span> &self.imm { sources.<span class="f">push</span>(Box::<span class="f">new</span>(m.<span class="f">iter_lsm</span>())); }
+        <span class="k">for</span> r <span class="k">in</span> &self.ssts { sources.<span class="f">push</span>(Box::<span class="f">new</span>(r.<span class="f">iter</span>())); }
+        <span class="k">let</span> <span class="k">mut</span> it = DBIter::<span class="f">new</span>(sources, snapshot);
+        it.<span class="f">seek</span>(start);
+        <span class="k">let</span> <span class="k">mut</span> out = Vec::<span class="f">new</span>();
+        <span class="k">while</span> it.<span class="f">valid</span>() {
+            <span class="k">if</span> it.<span class="f">key</span>() >= end { <span class="k">break</span>; }                 <span class="c">// 半开区间 [start, end)</span>
+            out.<span class="f">push</span>((Bytes::<span class="f">copy_from_slice</span>(it.<span class="f">key</span>()), Bytes::<span class="f">copy_from_slice</span>(it.<span class="f">value</span>())));
+            it.<span class="f">next</span>();
+        }
+        out
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">注意 <code>scan</code> 主循环肉眼可见地<strong>瘦了</strong>:不再手动判 <code>value_type</code>、不再手动 strip user_key——那些都被 DBIter 吞掉了。引擎层只剩"<strong>建源 → seek → 收集到 end</strong>"。源优先级顺序(mem→imm→ssts)就是去重时的"谁更新":同一 user_key 同 seq 不会跨源出现(seq 全局唯一),但更高优先级源天然排在前,DBIter 取组内第一个可见的即对。</p>
+
+  <h2>🧰 Coding style:语义归位 · 前瞻型游标 · 主循环越薄越对</h2>
+  <ul>
+    <li><strong>把语义放在懂它的那一层</strong>:去重/快照/墓碑都依赖 seq 和 type,就该在懂 seq/type 的 DBIter 做,而非归并层。G2 的"在 MergeIterator 去重"是没有快照时的权宜;需求一变(要历史快照),错放的逻辑就拦路。<strong>分层的判据是"这段逻辑依赖的信息在哪一层可见"。</strong></li>
+    <li><strong>前瞻型游标必然要缓存</strong>:当"当前该输出什么"要看完一整组才能定,就得把结论拷进 owned 字段,因为底层迭代器已经走过去了。这不是浪费,是这类游标的本质代价。</li>
+    <li><strong>对外 API 主循环越薄,说明分层越对</strong>:<code>scan_as_of</code> 收缩成"建源→seek→收集",所有脏活在 DBIter——主循环的厚薄是分层质量的体感指标。</li>
+  </ul>
+
+  <h2>🧠 System mindset:一次遍历,三重过滤</h2>
+  <p>DBIter 是 LSM 读路径的<strong>收口</strong>:底层无数版本散在 active/imm/多个 SST,经 MergeIterator 汇成一条有序流,DBIter 一遍走过、就地完成三重过滤(快照 / 去重 / 墓碑),吐出干净的 user-level KV。这套"<strong>归并 + 语义过滤分层</strong>"几乎是所有 LSM 引擎的统一读路径:</p>
+  <table>
+    <thead><tr><th>系统</th><th>底层归并</th><th>语义层</th></tr></thead>
+    <tbody>
+      <tr><td>RocksDB / LevelDB</td><td>MergingIterator</td><td>DBIter(快照 + 去重 + 墓碑)</td></tr>
+      <tr><td>本项目</td><td>MergeIterator</td><td>DBIter(本课)</td></tr>
+      <tr><td>Cassandra</td><td>多 SSTable 归并</td><td>row resolution(时间戳取最新 + tombstone)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:面对"多个有序源、每个源有重复/过期/删除标记"的合并问题(日志聚合、事件溯源、CRDT 收敛、版本化文件系统),通用解都是<strong>先归并成一条有序流,再用一个懂语义的游标做一遍过滤</strong>,而不是把过滤揉进归并。两层各自简单、各自可测。</p>
+
+  <h2>🧪 Harness 系统:范围时间旅行三问</h2>
+  <div class="harness">
+    <div class="kicker">三条性质</div>
+    <p style="margin:.3em 0 0">① <strong>时间旅行</strong>:put a,b → 抓 s1 → 覆盖 a、删 b、新增 c。<code>scan</code> 当前 = {a2, c};<code>scan_as_of(s1)</code> = {a1, b1}(覆盖/删除/新增全不可见)。② <strong>跨 flush</strong>:抓 s1 后把 v1/v2/墓碑全 flush 进 SST,<code>scan</code> 当前为空(已删),<code>scan_as_of(s1)</code> 仍 = {v1}。③ <strong>scan≡get</strong>:随机交错 put/delete/freeze/flush,沿途抓多个快照;对每个快照,<code>scan_as_of</code> 全量 == 对每个 key 调 <code>get_as_of</code> 的非空集合。<strong>这条把范围读和点读钉死成同一真相。</strong></p>
+  </div>
+
+  <h3>代码 3 — harness(engine.rs tests)</h3>
+  <pre>    <span class="c">#[test]</span> <span class="c">// 范围时间旅行</span>
+    <span class="k">fn</span> <span class="f">scan_as_of_time_travel</span>() {
+        e.<span class="f">put</span>(<span class="s">"a"</span>.., <span class="s">"a1"</span>..); e.<span class="f">put</span>(<span class="s">"b"</span>.., <span class="s">"b1"</span>..);  <span class="k">let</span> s1 = e.<span class="f">snapshot</span>();
+        e.<span class="f">put</span>(<span class="s">"a"</span>.., <span class="s">"a2"</span>..); e.<span class="f">delete</span>(<span class="s">"b"</span>..); e.<span class="f">put</span>(<span class="s">"c"</span>.., <span class="s">"c1"</span>..);
+        <span class="f">assert_eq!</span>(e.<span class="f">scan</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>), vec![(<span class="s">"a"</span>,<span class="s">"a2"</span>), (<span class="s">"c"</span>,<span class="s">"c1"</span>)]);   <span class="c">// 当前</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">scan_as_of</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>, s1), vec![(<span class="s">"a"</span>,<span class="s">"a1"</span>), (<span class="s">"b"</span>,<span class="s">"b1"</span>)]); <span class="c">// s1</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 跨 flush</span>
+    <span class="k">fn</span> <span class="f">scan_as_of_survives_flush</span>() {
+        e.<span class="f">put</span>(<span class="s">"k"</span>.., <span class="s">"v1"</span>..); <span class="k">let</span> s1 = e.<span class="f">snapshot</span>();
+        e.<span class="f">put</span>(<span class="s">"k"</span>.., <span class="s">"v2"</span>..); e.<span class="f">delete</span>(<span class="s">"k"</span>..); e.<span class="f">flush</span>();   <span class="c">// v1,v2,墓碑全进 SST</span>
+        <span class="f">assert!</span>(e.<span class="f">scan</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>).<span class="f">is_empty</span>());                  <span class="c">// 当前 = 已删</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">scan_as_of</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>, s1), vec![(<span class="s">"k"</span>,<span class="s">"v1"</span>)]);
+    }
+
+    <span class="c">#[test]</span> <span class="c">// scan ≡ get,随机交错 + 多快照对拍</span>
+    <span class="k">fn</span> <span class="f">scan_equiv_get_under_snapshot</span>() {
+        <span class="c">// 2000 步随机 put/delete/freeze/flush,每 100 步抓一个快照</span>
+        <span class="k">for</span> &snap <span class="k">in</span> &snaps {
+            <span class="k">let</span> scanned = e.<span class="f">scan_as_of</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>, snap);    <span class="c">// 全量</span>
+            <span class="k">for</span> p <span class="k">in</span> 0..30 {                                   <span class="c">// 逐 key 对拍 get_as_of</span>
+                <span class="f">assert_eq!</span>(scanned.<span class="f">get</span>(k), e.<span class="f">get_as_of</span>(k, snap));
+            }
+        }
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo clippy --all-targets</div>
+  <div class="done"><div class="kicker">K 判定 — 全绿 · Phase K 收官</div><p style="margin:.3em 0 0"><code>scan_as_of_time_travel ... ok</code> · <code>scan_as_of_survives_flush ... ok</code> · <code>scan_equiv_get_under_snapshot ... ok</code><br>+ G2/H/J 范围与点读全部回归<br><strong>50 passed; 0 failed</strong> · clippy 0 warning</p></div>
+
+  <div class="milestone">🏁 <strong>Phase K 达成 = Tier 2 / M2 多版本引擎全部收官</strong>。点读(<code>get_as_of</code>)+ 范围读(<code>scan_as_of</code>)都快照一致 + 墓碑感知;归并层回归纯净,语义全在 DBIter。<strong>下一里程碑 Tier 3:compaction</strong> —— 真正物理回收被遮蔽的旧版本和墓碑,并引入"最老活跃快照"作为回收安全水位(K/J 留下的那个伏笔)。</div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">K 想透这几个</div>
+    <ol>
+      <li><strong>为什么去重不能留在 MergeIterator,必须上移到 DBIter?</strong>(去重要取"该快照下最新可见版本",这依赖 seq 和 snapshot 的比较;MergeIterator 只懂字节序、不懂 seq,无法判断"对某个历史快照哪个版本算最新"。G2 在归并层去重碰巧对,只因当时永远读全局最新。需求加入快照后,逻辑必须搬到懂 seq 的层。)</li>
+      <li><strong>DBIter 怎么在一个 user_key 的整组版本里挑中"该快照下最新可见"?</strong>(组内版本按 seq 降序排(InternalKey 编码保证)。顺序扫这组,跳过 <code>seq &gt;= snapshot</code> 的(不可见),取<strong>第一个</strong> <code>seq &lt; snapshot</code> 的——因为降序,第一个满足的就是 seq 最大的可见版本 = 最新可见。它若是墓碑则整 key 不吐,是 value 则吐。)</li>
+      <li><strong>为什么 <code>cur</code> 要存 owned 拷贝,不能返回底层切片?</strong>(决定"当前吐什么"要把整组版本消费完,消费完 inner 已走到下一组,底层切片失效。所以在消费时把选中的 (user_key, value) 拷进 cur,key()/value() 才能稳定返回。前瞻整组型游标的固有代价。)</li>
+      <li><strong>scan 主循环为什么比 G2 薄那么多?</strong>(G2 在主循环里手动判 value_type 跳墓碑、手动 strip user_key、还依赖 MergeIterator 去重;K 把这三件全压进 DBIter,主循环只剩 seek + 收集到 end。<strong>对外 API 的主循环厚薄,是内部分层是否到位的体感指标</strong>——脏活都在该在的层,调用方就干净。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一站:Tier 3 — Compaction.</strong> 至此引擎"只追加、不回收",旧版本和墓碑永久堆积。Compaction 会归并多个 SST、<strong>物理丢弃</strong>被遮蔽的旧值与已无快照引用的墓碑,并把"最老活跃快照 seq"当作回收安全水位(早于它且被覆盖的才能丢)。这正是 J/K 反复提到的"快照 ↔ GC 协调"落地之处。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/db_iter.cc">db_iter.cc</a>(FindNextUserEntry / saved_key_)。</p>
+    <p>想完跟我对答案,或说"开始 Tier 3"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

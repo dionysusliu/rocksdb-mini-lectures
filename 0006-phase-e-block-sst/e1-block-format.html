@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E1 · 块格式 + 零拷贝读</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">Phase E</a> &nbsp;·&nbsp; E1 &nbsp;·&nbsp; <a href="e2-block-sst.html">E2 →</a></div>
+
+  <div class="kicker">STEP E1 · Phase E block-based SST</div>
+  <h1>块格式 + 零拷贝读</h1>
+  <p>新建 <code>block.rs</code>,造出 SST 的最小 I/O 单位——<strong>块(block)</strong>。一个块把若干条有序 <code>(key,val)</code> 打包成一段连续字节;读时整块作为一个 <code>bytes::Bytes</code> 载入,块内查找返回<strong>借入这段缓冲的 <code>&amp;[u8]</code></strong>。这一步先把块本身做对、做"零拷贝",E2 再用它拼成稀疏索引的 SST。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">写出 <code>BlockBuilder</code>:<code>add(key,val)</code> 升序追加、<code>finish() -&gt; Bytes</code> 倒出整块;以及 <code>Block</code>:<code>decode(Bytes)</code> 解析、<code>get(&amp;[u8]) -&gt; Option&lt;&amp;[u8]&gt;</code> 块内二分并<strong>返回借入块缓冲的切片</strong>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> round-trip(build→decode 全键可读、空 value 不丢)绿;<strong>零拷贝断言</strong>(返回切片指针落在块缓冲区间内)绿。</p>
+  </div>
+
+  <h3>块布局:定长尾巴指向变长正文(格式锚)</h3>
+  <p>块的字节布局只有三段,关键在于<strong>顺序</strong>:</p>
+  <svg viewBox="0 0 700 120" font-family="ui-monospace,monospace" font-size="11">
+    <rect x="10" y="30" width="360" height="40" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="190" y="55" text-anchor="middle" fill="#3a5a2a">entries: [klen|key|vlen|val] × N(流式追加)</text>
+    <rect x="370" y="30" width="220" height="40" fill="#f4f1e8" stroke="#c9a25a"/>
+    <text x="480" y="55" text-anchor="middle" fill="#8a5a12">offsets: off₀ off₁ … offₙ₋₁ (u32×N)</text>
+    <rect x="590" y="30" width="100" height="40" fill="#fcf3ee" stroke="#c98a6a"/>
+    <text x="640" y="55" text-anchor="middle" fill="#7a3b2e">count(u32)</text>
+    <text x="10" y="95" fill="#888">读者:先读末 4 字节 count → 反推 offsets 数组起点 = len-4-count×4 → 二分 offsets 定位每条 entry</text>
+  </svg>
+  <p>为什么 offsets 在<strong>尾部</strong>、还要再缀一个 count?因为<strong>写</strong>是流式的——逐条 <code>add</code> 时整块多大、有几条都还不知道;而<strong>读</strong>需要随机定位第 i 条。把"目录"(offsets)推到正文之后、再用一个<strong>定长的尾巴</strong>(count)指向它,读者就能从文件尾<strong>反向</strong>解析。这正是 RocksDB 块尾 <code>restarts[] + num_restarts</code> 的结构,也是 ZIP 中央目录、SST footer 反复出现的同一套路。</p>
+  <span class="src">table/block_based/block_builder.cc:30 // restarts: uint32[num_restarts]  ::189 Slice BlockBuilder::Finish()(append restart array)</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>src/block.rs</code>,写 <code>BlockBuilder</code>(「代码 1」):<code>add</code> 记下偏移再追加 entry,<code>estimated_size</code> 供 E2 判断"块满没",<code>finish</code> 缀上 offsets + count。</li>
+    <li>写 <code>Block</code>(「代码 2」):<code>decode</code> 从尾部解析 offsets;<code>entry_at</code> 取第 i 条;<code>get</code> 对 offsets 二分,命中返回<strong>借入 <code>data</code></strong> 的 value 切片。</li>
+    <li>在 <code>lib.rs</code> 加 <code>pub mod block;</code>;敲入「代码 3」两个 harness,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>BlockBuilder</code></h3>
+  <pre><span class="k">use</span> bytes::Bytes;
+
+<span class="c">/// 块构建器:按 key 升序 add,finish 倒出一段可写盘的 Bytes。</span>
+<span class="k">pub struct</span> <span class="t">BlockBuilder</span> {
+    buf: Vec&lt;u8&gt;,      <span class="c">// entries 区</span>
+    offsets: Vec&lt;u32&gt;, <span class="c">// 每条 entry 的起始偏移</span>
+}
+<span class="k">impl</span> <span class="t">BlockBuilder</span> {
+    <span class="k">pub fn</span> <span class="f">new</span>() -> Self { Self { buf: Vec::new(), offsets: Vec::new() } }
+
+    <span class="c">/// 追加一条 entry。调用者保证整体升序(由 SstBuilder 统一把关)。</span>
+    <span class="k">pub fn</span> <span class="f">add</span>(&<span class="k">mut</span> self, key: &[u8], val: &[u8]) {
+        self.offsets.<span class="f">push</span>(self.buf.<span class="f">len</span>() <span class="k">as</span> u32);
+        self.buf.<span class="f">extend_from_slice</span>(&(key.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>());
+        self.buf.<span class="f">extend_from_slice</span>(key);
+        self.buf.<span class="f">extend_from_slice</span>(&(val.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>());
+        self.buf.<span class="f">extend_from_slice</span>(val);
+    }
+
+    <span class="k">pub fn</span> <span class="f">is_empty</span>(&self) -> bool { self.offsets.<span class="f">is_empty</span>() }
+
+    <span class="c">/// 估算 finish 后的字节数:entries + offsets 数组 + 末尾 count。E2 用它判断块满。</span>
+    <span class="k">pub fn</span> <span class="f">estimated_size</span>(&self) -> usize { self.buf.<span class="f">len</span>() + self.offsets.<span class="f">len</span>() * 4 + 4 }
+
+    <span class="c">/// 倒出整块:[entries][offsets][count]。消费 self。</span>
+    <span class="k">pub fn</span> <span class="f">finish</span>(self) -> Bytes {
+        <span class="k">let</span> <span class="k">mut</span> buf = self.buf;
+        <span class="k">for</span> off <span class="k">in</span> &self.offsets { buf.<span class="f">extend_from_slice</span>(&off.<span class="f">to_le_bytes</span>()); }
+        buf.<span class="f">extend_from_slice</span>(&(self.offsets.<span class="f">len</span>() <span class="k">as</span> u32).<span class="f">to_le_bytes</span>());
+        Bytes::<span class="f">from</span>(buf)
+    }
+}
+<span class="k">impl</span> <span class="t">Default</span> <span class="k">for</span> <span class="t">BlockBuilder</span> { <span class="k">fn</span> <span class="f">default</span>() -> Self { Self::<span class="f">new</span>() } }</pre>
+
+  <h3>代码 2 — <code>Block</code>(零拷贝点查的核心)</h3>
+  <pre><span class="c">/// 解析好的只读块。data 持整块字节;查找返回借入 data 的切片(零拷贝)。</span>
+<span class="k">pub struct</span> <span class="t">Block</span> {
+    data: Bytes,
+    offsets: Vec&lt;u32&gt;, <span class="c">// 从尾部 offsets 数组解析出的每条 entry 偏移</span>
+}
+<span class="k">impl</span> <span class="t">Block</span> {
+    <span class="k">pub fn</span> <span class="f">decode</span>(data: Bytes) -> Self {
+        <span class="k">let</span> n = data.<span class="f">len</span>();
+        <span class="k">let</span> count = u32::<span class="f">from_le_bytes</span>(data[n - 4..n].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> usize;
+        <span class="k">let</span> off_start = n - 4 - count * 4;          <span class="c">// 反推 offsets 数组起点</span>
+        <span class="k">let</span> <span class="k">mut</span> offsets = Vec::<span class="f">with_capacity</span>(count);
+        <span class="k">for</span> i <span class="k">in</span> 0..count {
+            <span class="k">let</span> p = off_start + i * 4;
+            offsets.<span class="f">push</span>(u32::<span class="f">from_le_bytes</span>(data[p..p + 4].<span class="f">try_into</span>().<span class="f">unwrap</span>()));
+        }
+        Self { data, offsets }
+    }
+
+    <span class="k">pub fn</span> <span class="f">len</span>(&self) -> usize { self.offsets.<span class="f">len</span>() }
+    <span class="k">pub fn</span> <span class="f">is_empty</span>(&self) -> bool { self.offsets.<span class="f">is_empty</span>() }
+
+    <span class="c">/// 取第 i 条 entry 的 (key, val),均为借入 data 的切片(零拷贝)。</span>
+    <span class="k">pub fn</span> <span class="f">entry_at</span>(&self, i: usize) -> (&[u8], &[u8]) {
+        <span class="k">let</span> off = self.offsets[i] <span class="k">as</span> usize;
+        <span class="k">let</span> kl = u32::<span class="f">from_le_bytes</span>(self.data[off..off + 4].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> usize;
+        <span class="k">let</span> kstart = off + 4;
+        <span class="k">let</span> key = &self.data[kstart..kstart + kl];
+        <span class="k">let</span> vstart = kstart + kl;
+        <span class="k">let</span> vl = u32::<span class="f">from_le_bytes</span>(self.data[vstart..vstart + 4].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> usize;
+        <span class="k">let</span> val = &self.data[vstart + 4..vstart + 4 + vl];
+        (key, val)
+    }
+
+    <span class="c">/// 块内二分点查:命中返回借入本块缓冲的 value 切片(零拷贝)。</span>
+    <span class="c">/// 返回值生命周期绑定到 &self —— value 只在 Block 活着时有效。</span>
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;&[u8]&gt; {
+        <span class="k">let</span> idx = self.offsets
+            .<span class="f">binary_search_by</span>(|&off| {
+                <span class="k">let</span> off = off <span class="k">as</span> usize;
+                <span class="k">let</span> kl = u32::<span class="f">from_le_bytes</span>(self.data[off..off + 4].<span class="f">try_into</span>().<span class="f">unwrap</span>()) <span class="k">as</span> usize;
+                self.data[off + 4..off + 4 + kl].<span class="f">cmp</span>(key)
+            })
+            .<span class="f">ok</span>()?;
+        Some(self.<span class="f">entry_at</span>(idx).1)
+    }
+}</pre>
+  <div class="warnbox"><strong>借用检查的小关卡.</strong> <code>get</code> 里 <code>self.offsets.binary_search_by(|&amp;off| ... self.data ...)</code> 同时借了 <code>self.offsets</code> 和 <code>self.data</code>——但都是<strong>不可变</strong>借用,且是不同字段,编译器放行。如果哪天你想在闭包里改 <code>self</code> 就会爆。这也是为什么"读"路径天然好并行——全是共享只读借用。</div>
+
+  <h2>🧰 Coding style:Builder 模式 · finish 消费 self · 类型签名即契约</h2>
+  <ul>
+    <li><strong>Builder 模式(可变累积 → 不可变成品)</strong>:<code>BlockBuilder</code> 是个<strong>一次性、可变</strong>的攒数据容器,<code>finish(self)</code> <strong>消费</strong>它、吐出<strong>不可变</strong>的 <code>Bytes</code>。<code>finish</code> 取 <code>self</code>(非 <code>&amp;self</code>)是关键——它在类型层面保证"封口后不能再 add",误用直接编译不过。这套"mutable builder → immutable artifact"在 protobuf、<code>String::from</code>、各种 <code>...Builder</code> 里反复出现。</li>
+    <li><strong>用生命周期把"零拷贝"写进签名</strong>:<code>fn get(&amp;self, key) -&gt; Option&lt;&amp;[u8]&gt;</code> 里返回的 <code>&amp;[u8]</code> 默认借用 <code>&amp;self</code>。这一行签名就是一份<strong>契约</strong>:返回值<strong>不拥有</strong>数据,只是<strong>借</strong>块的缓冲——块一 drop,切片就失效,编译器替你盯着。对比 Phase D 的 <code>get -&gt; Option&lt;Bytes&gt;</code>(拥有、拷贝)。<strong>"返回借用还是拥有",是 API 设计里最影响性能的一个二选一。</strong></li>
+    <li><strong>偏移数组 = 把"随机访问"外挂到顺序存储上</strong>:entries 是顺序流,本身只能从头扫;额外一个 <code>offsets: Vec&lt;u32&gt;</code> 就让它支持 O(log n) 二分。这是"<strong>用一个小索引换随机访问能力</strong>"的通用手法(等同 CSV + 行偏移索引、mmap 文件 + 偏移表)。</li>
+  </ul>
+
+  <h2>🧠 System mindset:块 = 存储栈的通用货币 · 对齐 page</h2>
+  <p>"为什么是<strong>块</strong>,不是一条条记录?"——因为从硬件到 OS,数据搬运的最小单位从来不是"一条":</p>
+  <table>
+    <thead><tr><th>层</th><th>"块"在这层叫什么 / 多大</th></tr></thead>
+    <tbody>
+      <tr><td><strong>硬件</strong></td><td>磁盘<strong>扇区</strong>(512B/4KB)、SSD <strong>page</strong>(4–16KB)/ erase block;读小于一扇区也要搬整扇区</td></tr>
+      <tr><td><strong>操作系统</strong></td><td>虚拟内存<strong>页</strong>(4KB)、page cache 以页为单位换入换出;<code>read()</code> 命中的是页</td></tr>
+      <tr><td><strong>文件系统</strong></td><td>ext4/xfs 的 <strong>block</strong>(默认 4KB);文件按 block 分配</td></tr>
+      <tr><td><strong>数据库</strong></td><td>B-tree 的 <strong>page</strong>(Postgres 8KB、InnoDB 16KB);LSM 的 <strong>data block</strong>(RocksDB 默认 4KB)</td></tr>
+      <tr><td><strong>网络</strong></td><td>TCP <strong>MSS</strong> / 以太网 <strong>MTU</strong>(1500B);发小于一个包也占一个包</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:块大小是一组<strong>对冲</strong>的旋钮。块越大 → 索引越稀疏、顺序吞吐越高、压缩率越好,但点查的<strong>读放大</strong>越大(为读一个 key 要搬整块)、cache 粒度越粗。块越小 → 点查省、但索引膨胀、每块的固定开销(checksum/handle)占比升高。RocksDB 默认 <code>block_size=4KB</code> 不是巧合——它<strong>对齐 OS page</strong>,让一次块读尽量正好是一次 page cache 命中。见到任何"按块/页/包分批"的系统,先问:<strong>块多大?对齐了下层的什么单位?读写放大各是多少?</strong></p>
+
+  <h2>🧪 Harness 系统:零拷贝借用断言(指针落点)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">"零拷贝"是个容易<strong>口头声称、实际没做到</strong>的性质——把 <code>&amp;[u8]</code> 偷偷 <code>.to_vec()</code> 一下,类型签名没变、测试照过,但你已经多拷了一份。要把它<strong>钉死成可执行断言</strong>,就检查<strong>指针落点</strong>:<code>get</code> 返回切片的地址,必须落在块缓冲 <code>data</code> 的 <code>[as_ptr(), as_ptr()+len())</code> 区间内。落在区间内 = 它确实<strong>借</strong>的是块的内存,不是新分配的副本。这类"用地址/身份而非值来验证 aliasing"的 harness,在验证 arena 分配、mmap 视图、<code>Cow</code> 是否真的没克隆时都通用。</p>
+  </div>
+
+  <h3>代码 3 — 两个 harness(<code>block.rs</code> 的 <code>#[cfg(test)] mod tests</code>)</h3>
+  <pre>    <span class="c">// round-trip:build → finish → decode,逐条可读,顺序保持。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">block_roundtrip</span>() {
+        <span class="k">let</span> <span class="k">mut</span> b = BlockBuilder::<span class="f">new</span>();
+        b.<span class="f">add</span>(b<span class="s">"apple"</span>, b<span class="s">"red"</span>);
+        b.<span class="f">add</span>(b<span class="s">"banana"</span>, b<span class="s">"yellow"</span>);
+        b.<span class="f">add</span>(b<span class="s">"cherry"</span>, b<span class="s">""</span>); <span class="c">// 空 value</span>
+        <span class="k">let</span> block = Block::<span class="f">decode</span>(b.<span class="f">finish</span>());
+        <span class="f">assert_eq!</span>(block.<span class="f">len</span>(), 3);
+        <span class="f">assert_eq!</span>(block.<span class="f">get</span>(b<span class="s">"banana"</span>), Some(&b<span class="s">"yellow"</span>[..]));
+        <span class="f">assert_eq!</span>(block.<span class="f">get</span>(b<span class="s">"cherry"</span>), Some(&b<span class="s">""</span>[..]));
+        <span class="f">assert_eq!</span>(block.<span class="f">get</span>(b<span class="s">"missing"</span>), None);
+        <span class="f">assert_eq!</span>(block.<span class="f">get</span>(b<span class="s">"zebra"</span>), None); <span class="c">// 大于所有</span>
+    }
+
+    <span class="c">// 零拷贝不变量:get 返回的切片必须指向块缓冲内部,不是新分配的副本。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">get_borrows_into_block_buffer</span>() {
+        <span class="k">let</span> <span class="k">mut</span> b = BlockBuilder::<span class="f">new</span>();
+        b.<span class="f">add</span>(b<span class="s">"k1"</span>, b<span class="s">"value-one"</span>);
+        b.<span class="f">add</span>(b<span class="s">"k2"</span>, b<span class="s">"value-two"</span>);
+        <span class="k">let</span> block = Block::<span class="f">decode</span>(b.<span class="f">finish</span>());
+        <span class="k">let</span> v = block.<span class="f">get</span>(b<span class="s">"k2"</span>).<span class="f">unwrap</span>();
+        <span class="k">let</span> buf_start = block.data.<span class="f">as_ptr</span>() <span class="k">as</span> usize;     <span class="c">// 同模块测试可读私有字段</span>
+        <span class="k">let</span> buf_end = buf_start + block.data.<span class="f">len</span>();
+        <span class="k">let</span> v_ptr = v.<span class="f">as_ptr</span>() <span class="k">as</span> usize;
+        <span class="f">assert!</span>(v_ptr &gt;= buf_start && v_ptr &lt; buf_end,
+            <span class="s">"value 切片必须借入块缓冲(零拷贝),而非独立分配"</span>);
+        <span class="f">assert_eq!</span>(v, b<span class="s">"value-two"</span>);
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">参考实现里还多了 <code>entry_at_walks_in_order</code>(顺序遍历,E2 解析索引块要用)和 <code>estimated_size_matches_finish</code>(估算 == 真实长度,保证 E2 的封块阈值判断不偏)。一并敲上更稳。</p>
+
+  <div class="cmd">cd rocksdb-mini && cargo test block::</div>
+  <div class="done"><div class="kicker">E1 判定 — 全绿</div><p style="margin:.3em 0 0"><code>block::tests::block_roundtrip ... ok</code><br><code>block::tests::get_borrows_into_block_buffer ... ok</code><br><code>block::tests::entry_at_walks_in_order ... ok</code><br><code>block::tests::estimated_size_matches_finish ... ok</code></p></div>
+
+  <h2>🔄 CI/CD:无需动流水线,但多了一个"格式契约"测试面</h2>
+  <p>Phase D 已搭好 <code>test</code> / <code>integration</code> / <code>lint</code> 三档。E1 不新增 job——<code>block::</code> 的单测自动并入 <code>test</code> 档。值得记一笔的是:<strong>round-trip 测试是一种"格式契约"回归</strong>。一旦块布局(offsets 在尾、count 末 4 字节)被未来某次改动悄悄破坏,round-trip 立刻红。E2 会给流水线加一档<strong>块大小矩阵</strong>(同一组数据用不同 <code>block_size</code> 跑差分),把"格式在各种分块下都自洽"也纳入 CI。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">E1 想透这几个</div>
+    <ol>
+      <li><strong>offset 用 u32 的隐含上限</strong>:offsets 是 <code>u32</code>,意味着单个块最大 ~4GB。这对 4KB 的块绰绰有余。但如果某条 value 本身就 5GB,会发生什么?(提示:它会被塞进一个块,<code>offset as u32</code> 溢出。真引擎怎么处理"超大 value"?搜 RocksDB <em>BlobDB</em> / value separation。)</li>
+      <li><strong>为什么 restart_interval=1 是"诚实的简化"而非"错"</strong>:我们每条 entry 都存整 key、每条一个 offset。RocksDB 默认每 16 条才存一次整 key(restart point),中间用前缀压缩。这<strong>只影响空间/速度,不影响 get 的正确性</strong>。想想:加上前缀压缩后,块内二分还能直接比 key 吗?为什么二分点必须落在 restart point 上、然后再线性扫?(这是 Phase 后期的性能优化,先理解它<strong>为什么能晚做</strong>。)</li>
+      <li><strong>decode 的信任边界</strong>:<code>Block::decode</code> 无脑信任 count 和 offsets 合法。如果块字节被磁盘 bit-rot 翻了一位,<code>count</code> 变成天文数字,<code>off_start = n-4-count*4</code> 会下溢 panic。这暴露了什么缺失?(提示:per-block <strong>checksum</strong>,Phase AC。现在我们假设"写进去的字节读出来不变"——这个假设在真磁盘上不成立。)</li>
+      <li><strong>二分 vs 哈希</strong>:块内我们用二分(要求 entry 有序)。如果块内改用哈希表,点查 O(1) 但失去<strong>范围扫描</strong>能力。LSM 为什么宁要二分(有序)也不要哈希?(提示:Phase F 的迭代器、范围查询 <code>scan(a..b)</code> 全押在"块内有序"上。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:E2 — block-based SST + 稀疏索引.</strong> 块做好了,E2 把它拼成完整 SST:<code>SstBuilder</code> 攒块、超阈值封口、记 <code>(末键, BlockHandle)</code> 稀疏索引;<code>SstReader</code> 只载入索引,<code>get</code> 二分定位<strong>唯一候选块</strong>、<strong>只读那一块</strong>。届时上线本 Lab 的旗舰 harness:<strong>读放大不变量</strong>(一次点查只读一块)。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_builder.cc">block_builder.cc</a>(<code>BlockBuilder::Add</code> :222、<code>Finish</code> :189、块布局注释 :30)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block.h">block.h</a>(<code>class Block</code> :155、<code>BinarySeekRestartPointIndex</code> :737)。</p>
+    <p>想完跟我对答案,或说"继续 E2"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

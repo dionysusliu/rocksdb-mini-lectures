@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H2 · 写路径穿 seq — InternalKey 进存储</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="h1-internalkey.html">← H1</a> &nbsp;·&nbsp; <a href="index.html">Phase H</a> &nbsp;·&nbsp; H2</div>
+
+  <div class="kicker">STEP H2 · Phase H 多版本</div>
+  <h1>写路径穿 seq — InternalKey 进存储</h1>
+  <p>H1 造好了 InternalKey 这个"字",但还没人用。H2 把它<strong>穿进引擎</strong>:每次 <code>put</code> 分配一个递增 <code>seq</code>,memtable / WAL / SST 存的 key 从 user_key 变成 <code>encode(uk, seq, TYPE_VALUE)</code>。一旦写的是 InternalKey,<strong>读也得跟着改</strong>——get / scan 不能再用 plain key 精确匹配,得"按 user_key 找最新版本"。所以本课同时落:写路径分配 seq + 读路径取最新 + 归并按 user_key 去重。本阶段全是 <code>TYPE_VALUE</code>(墓碑/删除是 H3)。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">① <code>Engine</code> 加 <code>seq</code> 计数器,<code>put</code> 分配 seq、存 InternalKey、WAL 也存 InternalKey;<code>open</code> 从 WAL+SST 恢复 <code>seq</code> 续号。② <code>MemTable::get_newest</code> / <code>SstReader::get_newest</code>(seek <code>lookup_key</code> 取最新版本)+ <code>SstReader::max_seq</code>。③ <code>get</code> 逐层 get_newest;<code>scan</code> 用 <code>MergeIterator::with_dedup(user_key)</code> 去重 + 剥 trailer。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 既有 F/G 测试全回归;同 memtable 多版本 get 取最新、scan 去重为一条;seq 跨重启单调(重启后覆盖写赢过旧值)。</p>
+  </div>
+
+  <h3>关键链条:写 InternalKey ⇒ 读必须改</h3>
+  <p>这是本课最该想透的连锁。一旦 memtable 的 key 是 <code>encode(uk, seq, type)</code>:</p>
+  <table>
+    <thead><tr><th>原来(plain key)</th><th>现在(InternalKey)</th></tr></thead>
+    <tbody>
+      <tr><td><code>mem.get(uk)</code> 精确匹配</td><td>uk 不再是存储 key → 精确匹配<strong>必失配</strong>。改 <code>seek(lookup_key(uk, MAX))</code> 落到该 uk 最新版本,再比 <code>user_key()==uk</code></td></tr>
+      <tr><td>归并按<strong>整 key</strong>去重</td><td>同 uk 不同 seq = 不同 key → 整 key 去重<strong>漏掉</strong>,一个 uk 会吐出所有版本。改按 <strong>user_key</strong> 去重</td></tr>
+      <tr><td>scan 吐存储 key</td><td>存的是 InternalKey,得<strong>剥掉 9 字节 trailer</strong>再吐给用户</td></tr>
+      <tr><td>seq 不存在</td><td>重启要<strong>恢复 seq</strong>:WAL 里的 ik 带 seq,但 flush 后 WAL 截断 → 还得扫 SST 取 max seq</td></tr>
+    </tbody>
+  </table>
+  <p>所以 roadmap 把"写路径"和"读路径"分两步,但工程上<strong>它们必须同时落</strong>——存储格式一变,读路径不跟着改就直接挂。本课一并做掉;H3 只在此之上加"删除"这一种新 type 的语义。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li><code>MemTable::get_newest(uk, snap)</code> / <code>SstReader::get_newest</code> / <code>SstReader::max_seq</code>(「代码 1」)。</li>
+    <li><code>MergeIterator</code> 去重外置:加 <code>dedup_key: fn(&amp;[u8])-&gt;&amp;[u8]</code>,<code>with_dedup</code>;<code>next</code> 按 <code>dedup_key</code> 分组(「代码 2」)。</li>
+    <li><code>Engine</code>:<code>seq</code> 字段;<code>open</code> 恢复 seq;<code>put</code> 编码 ik;<code>get</code> 逐层 get_newest;<code>scan</code> with_dedup + 剥 trailer(「代码 3」)。</li>
+    <li>敲入「代码 4」H2 harness,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — get_newest / max_seq(memtable.rs · sst.rs)</h3>
+  <pre>    <span class="c">// 两个 reader 同款逻辑:seek lookup_key 落到 user_key 最新可见版本。</span>
+    <span class="k">pub fn</span> <span class="f">get_newest</span>(&self, user_key: &[u8], snap: Seq) -> Option&lt;(u8, Bytes)&gt; {
+        <span class="k">use</span> crate::internal_key <span class="k">as</span> ik;
+        <span class="k">let</span> lk = ik::<span class="f">lookup_key</span>(user_key, snap);
+        <span class="k">let</span> <span class="k">mut</span> it = self.<span class="f">iter</span>();          <span class="c">// memtable: iter_lsm()</span>
+        it.<span class="f">seek</span>(&lk);
+        <span class="k">if</span> it.<span class="f">valid</span>() && ik::<span class="f">user_key</span>(it.<span class="f">key</span>()) == user_key {
+            Some((ik::<span class="f">value_type</span>(it.<span class="f">key</span>()), Bytes::<span class="f">copy_from_slice</span>(it.<span class="f">value</span>())))
+        } <span class="k">else</span> { None }              <span class="c">// 本源无此 uk 的可见版本</span>
+    }
+
+    <span class="c">// open 恢复 seq 用:本 SST 最大 seq(MVP O(n) 全扫)。</span>
+    <span class="k">pub fn</span> <span class="f">max_seq</span>(&self) -> Seq {
+        <span class="k">let</span> <span class="k">mut</span> it = self.<span class="f">iter</span>(); it.<span class="f">seek_to_first</span>();
+        <span class="k">let</span> <span class="k">mut</span> m = 0;
+        <span class="k">while</span> it.<span class="f">valid</span>() { m = m.<span class="f">max</span>(crate::internal_key::<span class="f">seq</span>(it.<span class="f">key</span>())); it.<span class="f">next</span>(); }
+        m
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>seek(lookup_key(uk, snap))</code> 为什么落到"最新可见版本"?H1 讲过:同 uk 的版本 seq 降序排列,<code>lookup_key(uk, snap)</code> 的 trailer = <code>be(MAX-snap)</code> 恰是 seq≤snap 区段的<strong>下界</strong>——lower_bound 它,落在 seq≤snap 里 seq 最大(最新)那条。<code>snap=MAX</code> 即"读最新"。</p>
+
+  <h3>代码 2 — 归并去重外置(merge.rs)</h3>
+  <pre>    <span class="k">fn</span> <span class="f">identity_key</span>(k: &[u8]) -> &[u8] { k }     <span class="c">// 默认:整 key 去重(plain key/G1)</span>
+
+    <span class="k">pub struct</span> <span class="t">MergeIterator</span>&lt;<span class="k">'a</span>&gt; {
+        sources: Vec&lt;Box&lt;<span class="k">dyn</span> LsmIterator + <span class="k">'a</span>&gt;&gt;,
+        heap: BinaryHeap&lt;Reverse&lt;(Vec&lt;u8&gt;, usize)&gt;&gt;,
+        dedup_key: <span class="k">fn</span>(&[u8]) -> &[u8],          <span class="c">// 物理 key → 逻辑 key</span>
+    }
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">MergeIterator</span>&lt;<span class="k">'a</span>&gt; {
+        <span class="k">pub fn</span> <span class="f">new</span>(sources: …) -> Self { Self::<span class="f">with_dedup</span>(sources, identity_key) }
+        <span class="k">pub fn</span> <span class="f">with_dedup</span>(sources: …, dedup_key: <span class="k">fn</span>(&[u8])->&[u8]) -> Self { … }
+    }
+    <span class="c">// next:把所有 dedup_key == 当前堆顶 dedup_key 的源全推进(同 user_key 的多版本归一)</span>
+    <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) {
+        <span class="k">let</span> cur = <span class="k">match</span> self.heap.<span class="f">peek</span>() {
+            Some(Reverse((k, _))) => (self.dedup_key)(k).<span class="f">to_vec</span>(), None => <span class="k">return</span>,
+        };
+        <span class="k">while let</span> Some(Reverse((k, _))) = self.heap.<span class="f">peek</span>() {
+            <span class="k">if</span> (self.dedup_key)(k) != cur.<span class="f">as_slice</span>() { <span class="k">break</span>; }
+            <span class="k">let</span> Reverse((_, idx)) = self.heap.<span class="f">pop</span>().<span class="f">unwrap</span>();
+            self.sources[idx].<span class="f">next</span>();
+            <span class="k">if</span> self.sources[idx].<span class="f">valid</span>() { self.heap.<span class="f">push</span>(Reverse((self.sources[idx].<span class="f">key</span>().<span class="f">to_vec</span>(), idx))); }
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><strong>这就是 roadmap 说的"比较器重写",但更轻。</strong> 排序<strong>仍是裸字节</strong>(字节可比编码已让 ik 字节序 == user_key 升 / seq 降);只有<strong>去重分组</strong>换成 <code>user_key</code>。堆顶(最小 ik)= 该 user_key 最新版本,被读走后,<code>next</code> 把这个 user_key 的其余版本(含同源更旧版、低优先级源)全吞掉。<code>fn</code> 指针外置,G1 的 plain-key 测试用 <code>new</code>(identity)<strong>一字不改</strong>。</p>
+
+  <h3>代码 3 — Engine 穿 seq(engine.rs)</h3>
+  <pre>    <span class="k">struct</span> <span class="t">Engine</span> { …, seq: Seq }   <span class="c">// 下一个要分配的 seq</span>
+
+    <span class="c">// open:WAL 的 ik 带 seq;flush 后 WAL 截断 → 还得扫 SST 取 max seq</span>
+    <span class="k">let</span> <span class="k">mut</span> next_seq = 0;
+    <span class="k">for</span> (k, v) <span class="k">in</span> Wal::<span class="f">replay</span>(…)? { next_seq = next_seq.<span class="f">max</span>(ik::<span class="f">seq</span>(&k) + 1); mem.<span class="f">put</span>(k, v); }
+    <span class="k">for</span> r <span class="k">in</span> &ssts { next_seq = next_seq.<span class="f">max</span>(r.<span class="f">max_seq</span>() + 1); }
+
+    <span class="k">pub fn</span> <span class="f">put</span>(&<span class="k">mut</span> self, key: Key, value: Value) -> Result&lt;()&gt; {
+        <span class="k">let</span> s = self.seq; self.seq += 1;
+        <span class="k">let</span> ik = internal_key::<span class="f">encode</span>(&key, s, TYPE_VALUE);
+        self.wal.<span class="f">append</span>(&ik, &value)?; self.wal.<span class="f">sync</span>()?;   <span class="c">// WAL 存 ik,replay 重建版本</span>
+        self.mem.<span class="f">put</span>(ik, value);  …
+    }
+
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;Value&gt; {
+        <span class="k">let</span> snap = Seq::MAX;                            <span class="c">// 读最新</span>
+        <span class="k">if let</span> Some((t, v)) = self.mem.<span class="f">get_newest</span>(key, snap) { <span class="k">return</span> (t == TYPE_VALUE).<span class="f">then_some</span>(v); }
+        <span class="k">for</span> m <span class="k">in</span> &self.imm { <span class="k">if let</span> Some((t, v)) = m.<span class="f">get_newest</span>(key, snap) { <span class="k">return</span> (t==TYPE_VALUE).<span class="f">then_some</span>(v); } }
+        <span class="k">for</span> r <span class="k">in</span> &self.ssts { <span class="k">if let</span> Some((t, v)) = r.<span class="f">get_newest</span>(key, snap) { <span class="k">return</span> (t==TYPE_VALUE).<span class="f">then_some</span>(v); } }
+        None                                           <span class="c">// 第一个含该 uk 的源即最新(高优先级=更新 seq);命中即停</span>
+    }
+
+    <span class="k">pub fn</span> <span class="f">scan</span>(&self, start: &[u8], end: &[u8]) -> Vec&lt;(Key, Value)&gt; {
+        … sources 按优先级 …
+        <span class="k">let</span> <span class="k">mut</span> it = MergeIterator::<span class="f">with_dedup</span>(sources, internal_key::user_key);
+        it.<span class="f">seek</span>(&internal_key::<span class="f">lookup_key</span>(start, Seq::MAX));
+        <span class="k">while</span> it.<span class="f">valid</span>() {
+            <span class="k">let</span> uk = internal_key::<span class="f">user_key</span>(it.<span class="f">key</span>());
+            <span class="k">if</span> uk &gt;= end { <span class="k">break</span>; }
+            <span class="k">if</span> internal_key::<span class="f">value_type</span>(it.<span class="f">key</span>()) == TYPE_VALUE {   <span class="c">// 墓碑跳过(H3);H2 全 VALUE</span>
+                out.<span class="f">push</span>((Bytes::<span class="f">copy_from_slice</span>(uk), Bytes::<span class="f">copy_from_slice</span>(it.<span class="f">value</span>())));
+            }
+            it.<span class="f">next</span>();
+        }
+        out
+    }</pre>
+
+  <div class="warnbox"><strong>get 仍是逐层命中即停(不走归并)。</strong> 为什么第一个含该 user_key 的源就是全局最新?因为 <strong>seq 随时间单调、数据只从 mem 往 SST 单向下沉</strong>:一个 key 的最新版本必在含它的<strong>最高优先级</strong>源里。所以 <code>get</code> 保留"逐层问、命中即停"的独立优化路径(后面 Phase R 还能加 bloom 跳过整层),不必为点查开一整套归并——这正是 F 阶段定的"get 与 scan 两条路径"。两路对"谁最新"必须一致,H3 用 <code>get(k) ≡ scan(k..=k).first()</code> 锁死。</p>
+
+  <h2>🧰 Coding style:格式变更先想"读怎么跟" · 去重外置 · seq 续号双来源</h2>
+  <ul>
+    <li><strong>改存储格式,先问"读路径怎么跟"</strong>:写格式一变,所有读它的地方(精确匹配、去重、对外解码)都得同步。本课的连锁(get/scan/merge/seq 恢复)就是一次完整演练。<strong>"谁写、谁读、谁解码"列清单再动手</strong>,比改一处编译一处稳。</li>
+    <li><strong>去重规则外置成 <code>fn</code> 指针</strong>:把"什么算同一逻辑 key"从 <code>MergeIterator</code> 里拎出来当参数,plain key 与 InternalKey 共用同一台归并机。这就是<strong>策略模式</strong>的最轻量形态(一个函数指针),换语义不改结构。</li>
+    <li><strong>seq 续号要查所有持久层</strong>:WAL(未 flush 的)+ SST(已 flush 的)都可能藏着最大 seq。漏一个就会续号倒退、新写被旧值压住。<strong>"恢复单调计数器"必须扫尽所有可能的来源</strong>——这也暴露了"没有 manifest 持久化 seq"的 MVP 短板(Phase L 补)。</li>
+  </ul>
+
+  <h2>🧠 System mindset:版本戳进存储 = 不可变 + 单调时钟</h2>
+  <p>H2 把"逻辑时钟 seq"焊进了每一次写。这一步之后,引擎里<strong>没有"修改"了,只有"追加新版本"</strong>:覆盖 = 写一个更大 seq 的版本,旧版本仍躺在那(直到 compaction 回收)。这正是 MVCC / 事件溯源 / 不可变基础设施的共同形态:</p>
+  <table>
+    <thead><tr><th>系统</th><th>它的"seq"</th></tr></thead>
+    <tbody>
+      <tr><td>RocksDB / LevelDB</td><td>SequenceNumber(全局单调,本课同款)</td></tr>
+      <tr><td>Postgres MVCC</td><td>xmin/xmax(事务 ID)标记行版本可见区间</td></tr>
+      <tr><td>Git</td><td>commit 链(每次提交一个不可变快照)</td></tr>
+      <tr><td>分布式系统</td><td>Lamport 时钟 / 向量时钟(定因果序)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:给写盖一个<strong>全局单调的版本戳</strong>,是把"并发 + 历史 + 删除"一次性讲清的地基。代价是 seq 必须<strong>真单调</strong>——重启不能倒退、并发不能重复(本课单线程暂不涉并发分配,那是 Tier 4 的题)。一个倒退的时钟会让旧值压住新值,是这类系统最隐蔽的 bug 之一,所以 <code>seq_monotonic_across_reopen</code> 单独立一条测试盯它。</p>
+
+  <h2>🧪 Harness 系统:多版本去重 + seq 跨重启单调</h2>
+  <div class="harness">
+    <div class="kicker">两条新性质</div>
+    <p style="margin:.3em 0 0">① <strong>同 memtable 多版本</strong>:连写 <code>k=v1,v2,v3</code> 不 flush,<code>get(k)=v3</code>、<code>scan</code> 里 <code>k</code> <strong>只出一条</strong>(去重把 v1/v2 吞掉)。抓"去重漏版本 / 取错版本"。② <strong>seq 跨重启单调</strong>:写 <code>k=before</code> → flush(WAL 截断,seq 只剩在 SST)→ 重开 → 写 <code>k=after</code> → 必须 <code>get=after</code>。抓"重启 seq 没从 SST 恢复 → after 拿到 ≤before 的 seq → 旧值反而赢"。既有 F/G 全部测试照常回归——它们现在<strong>全程跑在 InternalKey 上</strong>,本身就是最强的"没改坏"证明。</p>
+  </div>
+
+  <h3>代码 4 — H2 harness(engine.rs tests)</h3>
+  <pre>    <span class="c">#[test]</span> <span class="c">// 同 memtable 多版本:get 取最新,scan 去重为一条</span>
+    <span class="k">fn</span> <span class="f">multiple_versions_same_memtable</span>() {
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        <span class="k">for</span> v <span class="k">in</span> [<span class="s">"v1"</span>,<span class="s">"v2"</span>,<span class="s">"v3"</span>] { e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), v.<span class="f">into</span>()).<span class="f">unwrap</span>(); }
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"k"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"v3"</span>[..]));
+        <span class="k">let</span> s = e.<span class="f">scan</span>(b<span class="s">""</span>, b<span class="s">"\xff"</span>);
+        <span class="f">assert_eq!</span>(s.<span class="f">len</span>(), 1);
+        <span class="f">assert_eq!</span>(s[0], (Bytes::<span class="f">from</span>(<span class="s">"k"</span>), Bytes::<span class="f">from</span>(<span class="s">"v3"</span>)));
+    }
+
+    <span class="c">#[test]</span> <span class="c">// seq 跨重启单调:重启后覆盖写赢过重启前旧值</span>
+    <span class="k">fn</span> <span class="f">seq_monotonic_across_reopen</span>() {
+        { <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();
+          e.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"before"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>(); e.<span class="f">flush</span>().<span class="f">unwrap</span>(); }  <span class="c">// before@0 落 SST</span>
+        <span class="k">let</span> <span class="k">mut</span> e2 = Engine::<span class="f">open</span>(dir).<span class="f">unwrap</span>();         <span class="c">// 须从 SST 恢复 seq=1</span>
+        e2.<span class="f">put</span>(<span class="s">"k"</span>.<span class="f">into</span>(), <span class="s">"after"</span>.<span class="f">into</span>()).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"k"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"after"</span>[..]));   <span class="c">// after 赢</span>
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">H2 判定 — 全绿</div><p style="margin:.3em 0 0"><code>multiple_versions_same_memtable ... ok</code> · <code>seq_monotonic_across_reopen ... ok</code><br>+ F/G/E/D 全部回归(现已全程跑在 InternalKey 上)<br><strong>41 passed; 0 failed</strong></p></div>
+
+  <div class="milestone">🏁 <strong>H2 达成:seq 穿透全引擎</strong>。写分配 seq、存 InternalKey;读按 user_key 取最新;归并按 user_key 去重。但还没有"删除"——所有写都是 <code>TYPE_VALUE</code>。<strong>H3</strong> 引入 <code>TYPE_DELETION</code> 墓碑 + <code>delete()</code> API:删 = 写一条墓碑,读到墓碑返回 None、归并时遮蔽旧值。</p></div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">H2 想透这几个</div>
+    <ol>
+      <li><strong>为什么 WAL 直接存 InternalKey,而不存 (uk, seq, type, v) 四元组?</strong>(InternalKey 本就把 uk+seq+type 编进一段连续字节 → WAL 的 "key" 字段塞 ik 即可,<strong>WAL 格式一行不改</strong>。replay 拿回 (ik, v) 直接 <code>mem.put</code>,seq/type 自带。少存一份、少一层解析。这是"<strong>把结构编进字节、让通道无脑搬运</strong>"的好处。)</li>
+      <li><strong>为什么 get 第一个命中的源就是最新?能逐层命中即停吗?</strong>(能。seq 单调 + 数据单向下沉 ⇒ 一个 key 的最新版本必在含它的最高优先级源。所以逐层问、命中即停就对,不必归并。<strong>反例要警惕</strong>:若哪天允许"低层 seq 比高层新"(乱序写入/导入),这个前提就破,get 必须改成跨层比 seq。我们的引擎不会,故安全。)</li>
+      <li><strong>同一个 user_key 在一个 memtable 里有多版本,<code>next</code> 怎么保证全吞掉?</strong>(<code>while dedup_key==cur</code> 循环:pop 胜者(最新)、推进它的源——该源很可能<strong>正好停在同 uk 的更旧版本</strong>,re-push 后循环再判 <code>dedup_key==cur</code> 仍真 → 再 pop 再推进。直到该源越过这个 user_key。所以"同源多版本"被循环自然吞干净,不漏。)</li>
+      <li><strong>seq 恢复为什么要扫 SST,不能只看 WAL?</strong>(flush 后 WAL 被截断,已落盘数据的 seq 只在 SST 里。只看 WAL → 重启后 seq 从 0 重来 → 新写的 seq 撞上甚至小于 SST 里的旧 seq → 旧值压新值。所以必须 <code>max(WAL, 每个 SST 的 max_seq)</code>。代价 O(n) 全扫——<strong>暴露了"seq 没被持久化"的短板</strong>,Phase L 的 manifest 会存下 seq,open 直接读,免全扫。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:H3 — 墓碑 + delete() + 两路径互锁.</strong> <code>delete(k)</code> = 写一条 <code>encode(k, seq, TYPE_DELETION)</code> 的墓碑(value 空)。get 见墓碑返回 None;scan 跳过墓碑;归并里墓碑作为该 user_key 的最新版本,遮蔽下面的旧值。再补 <code>get(k) ≡ scan(k..=k).first()</code> 把点查与范围读<strong>互锁</strong>。其实读路径在 H2 已留好 <code>type != VALUE → None</code> 的口子,H3 主要是加 <code>delete</code> 和验证语义。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl_write.cc">db_impl_write.cc</a>(seq 分配 / WriteBatch)· <a href="https://github.com/facebook/rocksdb/blob/main/db/dbformat.h">dbformat.h</a>(ValueType)。</p>
+    <p>想完跟我对答案,或说"继续 H3"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

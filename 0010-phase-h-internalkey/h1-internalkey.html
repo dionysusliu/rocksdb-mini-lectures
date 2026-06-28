@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>H1 · InternalKey — 字节可比的 seq+type 编码</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../0009-phase-g-merge/index.html">← Phase G</a> &nbsp;·&nbsp; <a href="index.html">Phase H</a> &nbsp;·&nbsp; H1</div>
+
+  <div class="kicker">STEP H1 · Phase H 多版本</div>
+  <h1>InternalKey — 字节可比的 seq+type 编码</h1>
+  <p>到 Phase G 为止,引擎对"同一个 key 的多个版本"只能靠<strong>源优先级</strong>猜新旧——可一旦 compaction 把多个版本写进同一个 SST,源顺序就分不清了。Phase H 给每个 key 编上<strong>序列号 seq</strong>(谁新)和<strong>类型 type</strong>(Put / Delete)。本课 H1 只做<strong>纯格式</strong>:定义 <code>InternalKey</code> 的编码 / 解码 / 比较,<strong>不碰任何存储</strong>。H2 把它穿进写路径,H3 穿进读路径 + 墓碑。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">新建 <code>internal_key.rs</code>:<code>encode(user_key, seq, type) -&gt; Bytes</code>、<code>user_key / seq / value_type</code> 解析、<code>lookup_key</code>。编码须<strong>字节可比</strong>:裸 <code>[u8]::cmp</code> 即给出 <strong>user_key 升序、同 user_key 内 seq 降序</strong>。<code>lib.rs</code> 加 <code>pub mod internal_key;</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> round-trip 解析正确;排序契约绿(<code>a@9 &lt; a@5 &lt; a@3 &lt; b@1</code>);<code>lookup_key(k, snap)</code> 的 lower_bound 落到 seq≤snap 的最新版本。</p>
+  </div>
+
+  <h3>核心设计:为什么是「字节可比编码」而不是「穿一个 Comparator」</h3>
+  <p>RocksDB 的 <code>InternalKey</code> = <code>user_key + (seq&lt;&lt;8 | type)</code>,再配一个 <code>InternalKeyComparator</code>:user_key 升序、seq <strong>降序</strong>(新值排前)。C++ 的容器(memtable skiplist、block)都收一个 comparator 仿函数,于是到处穿这个比较器即可。</p>
+  <p>Rust 这边有个硬约束:memtable 是 <code>crossbeam_skiplist::SkipMap&lt;Bytes, Bytes&gt;</code>,<strong>按 <code>Bytes</code> 的 <code>Ord</code>(裸字节)排序,不收外部 comparator</strong>;SST 块的二分也建在裸字节上。要把自定义 comparator 穿进这两处,代价很大。两条路:</p>
+  <table>
+    <thead><tr><th>方案</th><th>做法</th><th>取舍</th></tr></thead>
+    <tbody>
+      <tr><td><strong>✅ 字节可比编码</strong></td><td>把 seq 编成 <code>be(u64::MAX - seq)</code>(取反),让<strong>裸字节 Ord 直接 == 期望序</strong></td><td>memtable / block / 归并堆<strong>全用默认字节比较</strong>,零 comparator 穿线;代价:编码时算一下取反</td></tr>
+      <tr><td>comparator 穿线</td><td>保留 user_key/seq 分离,把 <code>InternalKeyComparator</code> 一路传给 SkipMap/block/merge</td><td>更贴 RocksDB;但 Rust 的 <code>SkipMap&lt;K: Ord&gt;</code> 不收 comparator,穿线侵入性大</td></tr>
+    </tbody>
+  </table>
+  <p><strong>我们选字节可比编码</strong>——它最契合 Rust 的 <code>Ord</code> 模型:存储层(memtable / SST)<strong>什么都不用改比较逻辑</strong>,只是 key 的字节变长了。唯一"懂 InternalKey"的地方收敛到读路径与归并去重(H3)。这正是 RocksDB 文档里 "bytewise-comparable encoding" 的思路。</p>
+
+  <h3>编码布局 + 取反 seq 的魔法</h3>
+  <pre>    InternalKey = user_key ‖ big_endian(u64::MAX - seq) ‖ [type:1]
+                             └──────── 8 字节 trailer ────────┘└ 1 ┘
+
+    想要的序:  user_key 升序  →  同 user_key 内 <b>seq 降序</b>(新值排前)
+    裸字节序:  user_key 升序(前缀主导)  →  trailer 升序
+    要让 "trailer 字节升序" == "seq 降序",存 <b>u64::MAX - seq</b>:
+        seq 大(新) → MAX-seq 小 → 字节靠前 → 排在同 user_key 最前 ✓</pre>
+  <p>举例:<code>a@9</code> 的 trailer 字节 <code>be(MAX-9)</code> 比 <code>a@5</code> 的 <code>be(MAX-5)</code> <strong>小</strong> → <code>a@9</code> 排在 <code>a@5</code> 前。于是同一个 user_key 的所有版本,<strong>seq 最大(最新)的天然落在最前</strong>——<code>seek</code> 到这个 user_key,第一个就是最新版本。这把"找最新版本"从"扫所有版本比 seq"降成"<code>lower_bound</code> 一下"。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>internal_key.rs</code>:常量 <code>TYPE_DELETION=0 / TYPE_VALUE=1 / TRAILER_LEN=9</code>;<code>encode</code>(「代码 1」)。<code>lib.rs</code> 加模块。</li>
+    <li>解析:<code>user_key</code>(切前缀)、<code>unpack_trailer -&gt; (seq, type)</code>、<code>lookup_key</code>(「代码 1」)。</li>
+    <li>敲入「代码 2」:round-trip + 排序契约 + lookup_key harness,<code>cargo test internal_key</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>internal_key.rs</code></h3>
+  <pre>    <span class="k">use</span> bytes::Bytes;
+
+    <span class="k">pub type</span> Seq = u64;                  <span class="c">// 每写自增,全局单调,越大越新</span>
+    <span class="k">pub const</span> TYPE_DELETION: u8 = 0;      <span class="c">// 墓碑</span>
+    <span class="k">pub const</span> TYPE_VALUE: u8 = 1;         <span class="c">// 普通写</span>
+    <span class="k">pub const</span> TRAILER_LEN: usize = 9;     <span class="c">// 8(取反 seq 大端)+ 1(type)</span>
+
+    <span class="k">pub fn</span> <span class="f">encode</span>(user_key: &[u8], seq: Seq, vtype: u8) -> Bytes {
+        <span class="k">let</span> <span class="k">mut</span> v = Vec::<span class="f">with_capacity</span>(user_key.<span class="f">len</span>() + TRAILER_LEN);
+        v.<span class="f">extend_from_slice</span>(user_key);
+        v.<span class="f">extend_from_slice</span>(&(u64::MAX - seq).<span class="f">to_be_bytes</span>());  <span class="c">// 取反 → 字节升序即 seq 降序</span>
+        v.<span class="f">push</span>(vtype);
+        Bytes::<span class="f">from</span>(v)
+    }
+    <span class="k">pub fn</span> <span class="f">user_key</span>(ik: &[u8]) -> &[u8] { &ik[..ik.<span class="f">len</span>() - TRAILER_LEN] }  <span class="c">// 零拷贝切片</span>
+    <span class="k">pub fn</span> <span class="f">unpack_trailer</span>(ik: &[u8]) -> (Seq, u8) {
+        <span class="k">let</span> n = ik.<span class="f">len</span>();
+        <span class="k">let</span> inv = u64::<span class="f">from_be_bytes</span>(ik[n - TRAILER_LEN..n - 1].<span class="f">try_into</span>().<span class="f">unwrap</span>());
+        (u64::MAX - inv, ik[n - 1])
+    }
+    <span class="k">pub fn</span> <span class="f">seq</span>(ik: &[u8]) -> Seq { <span class="f">unpack_trailer</span>(ik).0 }
+    <span class="k">pub fn</span> <span class="f">value_type</span>(ik: &[u8]) -> u8 { <span class="f">unpack_trailer</span>(ik).1 }
+
+    <span class="c">/// 查找键:user_key 在 seq&lt;=snapshot 里的最新版本 = lower_bound(lookup_key(uk, snap))。</span>
+    <span class="c">/// type 取**最小**(0):同 seq 上墓碑(type 0)排在 value(type 1)前,lookup 用最小 type</span>
+    <span class="c">/// 才排在该 seq 任何条目前或相等,lower_bound 不会跳过墓碑。(Phase J 有限快照下这点关键。)</span>
+    <span class="k">pub fn</span> <span class="f">lookup_key</span>(user_key: &[u8], snapshot_seq: Seq) -> Bytes {
+        <span class="f">encode</span>(user_key, snapshot_seq, 0)   <span class="c">// 0 = 最小 type,seek 用</span>
+    }</pre>
+
+  <div class="warnbox"><strong><code>lookup_key</code> 是 H3/J 的钥匙。</strong> 点查"user_key 在快照 snap 下的值" = 对所有源 <code>seek(lookup_key(uk, snap))</code>,落点若 <code>user_key()==uk</code> 即该 uk 在 seq≤snap 中的<strong>最新</strong>版本(seq 降序的最前那个);看它的 type 决定返回 value 还是 None(墓碑)。<strong>snap 给 <code>u64::MAX</code> 就是"读最新"(H3);给一个历史 seq 就是"读快照"(J)。</strong>同一把 <code>lookup_key</code>,H3 与 J 只差传入的 snap。</p>
+
+  <h2>🧰 Coding style:取反编码 · 切片解析零拷贝 · 常量命名对齐 RocksDB</h2>
+  <ul>
+    <li><strong>取反编码让默认 Ord 干活</strong>:与其到处穿自定义比较器,不如<strong>把"期望的序"烘进字节布局</strong>,让语言默认的 <code>Ord</code> 直接给对结果。这是"<strong>order-preserving encoding</strong>"的通用思路(整数大端、有符号数翻符号位、时间戳倒序…),数据库索引键编码里无处不在。</li>
+    <li><strong>解析全是零拷贝切片</strong>:<code>user_key(ik)</code> 返回 <code>&amp;ik[..n-9]</code>,不分配;trailer 用 <code>from_be_bytes</code> 定长解。InternalKey 在内存里就一段连续字节,user_key 与 trailer 是它的两个切片视图。</li>
+    <li><strong>常量对齐 RocksDB</strong>:<code>TYPE_DELETION=0 / TYPE_VALUE=1</code> 与 RocksDB <code>kTypeDeletion / kTypeValue</code> 同值。照搬业界约定,日后读 RocksDB 源码无缝对照。</li>
+  </ul>
+
+  <h2>🧠 System mindset:多版本 = 把"时间"编进 key</h2>
+  <p>LSM(以及一切 MVCC 系统)的根本一招:<strong>不原地改数据,而是给每次写盖一个版本戳(seq),让新旧并存、读时按版本挑</strong>。InternalKey 就是这个版本戳的载体。一旦 key 带了 seq:</p>
+  <table>
+    <thead><tr><th>能力</th><th>怎么来的</th></tr></thead>
+    <tbody>
+      <tr><td><strong>覆盖写不再靠源顺序</strong></td><td>同 user_key 多版本,seq 大者即最新——跨任何源、任何层都成立(compaction 混层也不怕)</td></tr>
+      <tr><td><strong>删除变成一种写</strong></td><td><code>TYPE_DELETION</code> 墓碑:删 = 写一条 type=Delete 的 InternalKey,归并时遮蔽旧值(H3)</td></tr>
+      <tr><td><strong>快照读 = 时间旅行</strong></td><td>带一个 <code>snapshot_seq</code>,只看 seq≤snap 的版本,无视之后的写——读到"过去的一致视图"(J)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:把"版本/时间"编进 key,是 MVCC、Git 对象、事件溯源、时序数据库的共同地基。<strong>"不可变 + 版本戳 + 读时挑版本"</strong>替代"可变 + 原地改",换来:并发读不加锁、历史可回溯、删除可延迟。代价是<strong>空间</strong>(旧版本堆积)——所以才需要 compaction(Tier 3)去回收。H1 立的这个小小 9 字节 trailer,是后面所有多版本能力的起点。</p>
+
+  <h2>🧪 Harness 系统:排序契约 + lookup 落位</h2>
+  <div class="harness">
+    <div class="kicker">编码的正确性 = 排序 + 可逆</div>
+    <p style="margin:.3em 0 0">两条性质钉死编码:① <strong>可逆</strong>——<code>encode</code> 后 <code>user_key/seq/type</code> 原样取回(含空 user_key、seq=0 边界)。② <strong>排序契约</strong>——一组 InternalKey 用裸 <code>sort()</code> 排,落位必须是 "user_key 升、同 user_key 内 seq 降"。第三条 <code>lookup_key</code>:对一列同 user_key 多版本(已 seq 降序),<code>partition_point(&lt; lookup_key(k, snap))</code> 必须落到 seq≤snap 的最新那条。这条直接预演 H3/J 的点查,把"快照可见性"在纯格式层先验一遍。</p>
+  </div>
+
+  <h3>代码 2 — harness(internal_key.rs tests)</h3>
+  <pre>    <span class="k">use</span> std::cmp::Ordering;
+
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">roundtrip_extracts_parts</span>() {
+        <span class="k">let</span> ik = <span class="f">encode</span>(b<span class="s">"apple"</span>, 42, TYPE_VALUE);
+        <span class="f">assert_eq!</span>(<span class="f">user_key</span>(&ik), b<span class="s">"apple"</span>);
+        <span class="f">assert_eq!</span>(<span class="f">seq</span>(&ik), 42);
+        <span class="f">assert_eq!</span>(<span class="f">value_type</span>(&ik), TYPE_VALUE);
+        <span class="k">let</span> tomb = <span class="f">encode</span>(b<span class="s">""</span>, 0, TYPE_DELETION);       <span class="c">// 空 uk + seq 0 边界</span>
+        <span class="f">assert_eq!</span>(<span class="f">unpack_trailer</span>(&tomb), (0, TYPE_DELETION));
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 裸字节序 = user_key 升、同 user_key seq 降</span>
+    <span class="k">fn</span> <span class="f">bytewise_order_is_userkey_asc_then_seq_desc</span>() {
+        <span class="k">let</span> (a9, a5, a3, b1) = (<span class="f">encode</span>(b<span class="s">"a"</span>,9,1), <span class="f">encode</span>(b<span class="s">"a"</span>,5,1), <span class="f">encode</span>(b<span class="s">"a"</span>,3,1), <span class="f">encode</span>(b<span class="s">"b"</span>,1,1));
+        <span class="f">assert_eq!</span>(a9.<span class="f">as_ref</span>().<span class="f">cmp</span>(a5.<span class="f">as_ref</span>()), Ordering::Less);  <span class="c">// 同 uk seq 大者前</span>
+        <span class="f">assert_eq!</span>(a3.<span class="f">as_ref</span>().<span class="f">cmp</span>(b1.<span class="f">as_ref</span>()), Ordering::Less);  <span class="c">// uk 主导</span>
+        <span class="k">let</span> <span class="k">mut</span> v = vec![b1.<span class="f">clone</span>(), a3.<span class="f">clone</span>(), a9.<span class="f">clone</span>(), a5.<span class="f">clone</span>()];
+        v.<span class="f">sort</span>();
+        <span class="f">assert_eq!</span>(v, vec![a9, a5, a3, b1]);              <span class="c">// 落位:a9,a5,a3,b1</span>
+    }
+
+    <span class="c">#[test]</span> <span class="c">// lookup_key:lower_bound 落到 seq<=snap 的最新版本</span>
+    <span class="k">fn</span> <span class="f">lookup_key_lands_on_newest_visible</span>() {
+        <span class="k">let</span> versions = [<span class="f">encode</span>(b<span class="s">"k"</span>,10,1), <span class="f">encode</span>(b<span class="s">"k"</span>,7,1), <span class="f">encode</span>(b<span class="s">"k"</span>,3,1)]; <span class="c">// seq 降序</span>
+        <span class="k">let</span> lk = <span class="f">lookup_key</span>(b<span class="s">"k"</span>, 8);
+        <span class="k">let</span> idx = versions.<span class="f">partition_point</span>(|ik| ik.<span class="f">as_ref</span>() &lt; lk.<span class="f">as_ref</span>());
+        <span class="f">assert_eq!</span>(<span class="f">seq</span>(&versions[idx]), 7);             <span class="c">// 看到 <=8 的最新 = 7(10 被跳过)</span>
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test internal_key</div>
+  <div class="done"><div class="kicker">H1 判定 — 全绿</div><p style="margin:.3em 0 0"><code>internal_key::tests::roundtrip_extracts_parts ... ok</code><br><code>internal_key::tests::bytewise_order_is_userkey_asc_then_seq_desc ... ok</code><br><code>internal_key::tests::lookup_key_lands_on_newest_visible ... ok</code><br>(纯格式,未碰存储 → F/G 全部回归照旧)</p></div>
+
+  <div class="milestone">🏁 <strong>H1 达成:多版本的「字」造好了</strong>。InternalKey 能编、能解、字节序天然对。但还没人用它——memtable / WAL / SST 存的还是 plain key。<strong>H2</strong> 把它穿进<strong>写路径</strong>:每次 put 分配一个 seq、存 InternalKey;WAL record 带上 seq+type。</p></div>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">H1 想透这几个</div>
+    <ol>
+      <li><strong>为什么 seq 要<u>取反</u>存,而不是直接存?</strong>(直接存大端 seq,字节序 = seq 升序 = 旧值排前;但我们要<strong>新值排前</strong>(seek 第一个就是最新)。取反 <code>MAX-seq</code> 把升序翻成降序。换个等价做法:存原 seq、但比较时把 trailer 当"降序"——那又得自定义 comparator,绕回老问题。取反编码把降序烘进字节,默认 Ord 就对。)</li>
+      <li><strong>type 放在 trailer<u>最后</u>一字节,会影响排序吗?</strong>(几乎不会:同 user_key 的两条若 seq 也相同,才轮到 type 比——而 seq 全局唯一(每写自增),<strong>同 user_key 同 seq 不会出现</strong>。所以 type 在排序里是"死字节",纯粹用来在读路径区分 Put/Delete。RocksDB 把 type 和 seq 打包进一个 u64,我们分开放,语义一致、更易读。)</li>
+      <li><strong>为什么存储层(memtable/SST)<u>不用</u>改比较逻辑?</strong>(因为编码是字节可比的:它们本就按裸字节 <code>Ord</code> 排,而我们的字节序<strong>已经</strong>== 期望的 InternalKey 序。它们只是"key 变长了 9 字节",排序代码一行不改。这就是字节编码相对 comparator 穿线的最大红利——<strong>把语义负担从"每处比较"挪到"一次编码"</strong>。)</li>
+      <li><strong>seq 会用完吗?</strong>(u64,每秒百万写也要约 58 万年。实践中不担心。RocksDB 同样 u64(实为 56-bit,留 8-bit 给 type)。<strong>设计上"够大到不用考虑回绕"</strong>是一种常见的工程简化。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:H2 — 写路径穿 seq.</strong> 引擎加一个全局 <code>seq</code> 计数器,每次 <code>put</code> 自增并分配;memtable 存的 key 从 user_key 变成 <code>encode(uk, seq, TYPE_VALUE)</code>;WAL record 带上 seq+type(replay 时重建带版本的 InternalKey)。<strong>get/scan 也要顺势改成"按 user_key 取最新版本"</strong>(否则存了 InternalKey 却用 plain key 查会失配)。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/dbformat.h">dbformat.h</a>(<code>InternalKey</code> / <code>InternalKeyComparator</code> / <code>ValueType</code>)。</p>
+    <p>想完跟我对答案,或说"继续 H2"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

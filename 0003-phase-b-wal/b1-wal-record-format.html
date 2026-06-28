@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B1 · WAL record 格式 + Writer</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .bytemap{display:flex;flex-wrap:wrap;gap:4px;margin:1em 0;font-family:ui-monospace,monospace;font-size:12px}
+  .bytemap div{padding:8px 10px;border-radius:4px;text-align:center;border:1px solid #ccc}
+  .bm-crc{background:#fde8e0;border-color:#e0a890}.bm-len{background:#e0ecf5;border-color:#a8c4e0}.bm-tag{background:#f5efd8;border-color:#d8c878}.bm-k{background:#e8f0e0;border-color:#b8d0a0}.bm-v{background:#f0e4f0;border-color:#d0a8d0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">← Phase B 总览</a> &nbsp;·&nbsp; B1 &nbsp;·&nbsp; <a href="b2-reader-recovery.html">B2 Reader+恢复 →</a></div>
+
+  <div class="kicker">STEP B1 · Phase B WAL</div>
+  <h1>WAL record 格式 + Writer</h1>
+  <p>持久化的第一性问题：<strong>磁盘上一条记录长什么样，才能在断电后被可靠地读回、且认得出自己有没有坏？</strong>这一步只设计字节布局 + 写出去。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>src/wal.rs</code> 的写端：<code>Wal::open_append</code> + <code>Wal::append(key,val)</code> + <code>Wal::sync</code>。一次 put 编码成一条带校验和的 record 落盘。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 故障注入 harness——翻转日志一个字节，校验和把那条 record 挡在门外。</p>
+  </div>
+
+  <h2>record 字节布局</h2>
+  <p>MVP 用最朴素的"自描述帧"：每条 record = 校验和 + 负载长度 + 负载本身。负载里再放一次操作。</p>
+  <div class="bytemap">
+    <div class="bm-crc">crc32<br>4B</div>
+    <div class="bm-len">len<br>4B</div>
+    <div class="bm-tag">tag<br>1B</div>
+    <div class="bm-len">klen<br>4B</div>
+    <div class="bm-k">key<br>klen B</div>
+    <div class="bm-len">vlen<br>4B</div>
+    <div class="bm-v">value<br>vlen B</div>
+  </div>
+  <p style="font-size:.9em;color:var(--soft)">外层帧 = <code>crc</code> + <code>len</code> + <code>payload</code>；<code>payload</code> = <code>tag</code>(0=Put) + <code>klen|key</code> + <code>vlen|value</code>。全部小端。<code>crc</code> 覆盖整个 <code>payload</code>。</p>
+
+  <h3>三个设计选择，每个对标 RocksDB（这才是要学的）</h3>
+  <table style="border-collapse:collapse;width:100%;font-size:.9em">
+    <tr style="background:var(--code-bg)"><th style="border:1px solid var(--rule);padding:7px">选择</th><th style="border:1px solid var(--rule);padding:7px">我们 MVP</th><th style="border:1px solid var(--rule);padding:7px">RocksDB</th></tr>
+    <tr><td style="border:1px solid var(--rule);padding:7px"><strong>校验和放哪</strong></td><td style="border:1px solid var(--rule);padding:7px">每条 record 头部，覆盖 payload</td><td style="border:1px solid var(--rule);padding:7px">同理，header 头 4 字节 crc32c（<span class="src">log_format.h:57 kHeaderSize=4+2+1</span>）</td></tr>
+    <tr><td style="border:1px solid var(--rule);padding:7px"><strong>长度宽度</strong></td><td style="border:1px solid var(--rule);padding:7px"><code>u32</code> 定长（简单）</td><td style="border:1px solid var(--rule);padding:7px">header 用 <code>u16</code> 长度（因为有 32KB 分块）；payload 内 key/val 用 <strong>varint</strong>（<span class="src">write_batch.cc:10 varstring</span>）省空间</td></tr>
+    <tr><td style="border:1px solid var(--rule);padding:7px"><strong>大record</strong></td><td style="border:1px solid var(--rule);padding:7px">整条写，不分块</td><td style="border:1px solid var(--rule);padding:7px">32KB block + kFirst/Middle/Last 分片（<span class="src">log_format.h:54 kBlockSize=32768</span>）</td></tr>
+  </table>
+  <div class="warnbox"><strong>诚实标注简化.</strong> 我们<strong>砍掉了 RocksDB 的 32KB 分块 + record 分片(kFirst/Middle/Last)</strong>。代价是无法在损坏后"重同步到下一个 block 边界"——见 B2 核心问题。MVP 阶段值得，但要知道砍了什么。</div>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>往 <code>rocksdb-mini/Cargo.toml</code> 的 <code>[dependencies]</code> 加 <code>crc32fast = "1"</code>（<code>anyhow</code> 已在）。</li>
+    <li>新建 <code>src/wal.rs</code>，敲入「代码 1」的写端部分（<code>replay</code> 留到 B2）。</li>
+    <li><code>src/lib.rs</code> 加 <code>pub mod wal;</code>。</li>
+    <li>敲入「代码 2」故障注入 harness，跑命令看绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>src/wal.rs</code> 写端</h3>
+  <pre><span class="c">// src/wal.rs — write-ahead log，断电不丢的底</span>
+<span class="k">use</span> std::fs::{File, OpenOptions};
+<span class="k">use</span> std::io::{BufWriter, Write};
+<span class="k">use</span> std::path::Path;
+<span class="k">use</span> anyhow::Result;
+
+<span class="k">pub const</span> TAG_PUT: <span class="t">u8</span> = 0; <span class="c">// 操作类型；将来 Delete=1（MVP 后）</span>
+
+<span class="k">pub struct</span> <span class="t">Wal</span> {
+    w: BufWriter&lt;File&gt;, <span class="c">// 缓冲写：攒够再下系统调用，减少 syscall</span>
+}
+
+<span class="k">impl</span> <span class="t">Wal</span> {
+    <span class="c">/// 追加模式打开（不存在则建）。append = O_APPEND，写永远落在文件尾。</span>
+    <span class="k">pub fn</span> <span class="f">open_append</span>(path: &Path) -> Result&lt;Self&gt; {
+        <span class="k">let</span> f = OpenOptions::<span class="f">new</span>().<span class="f">create</span>(<span class="k">true</span>).<span class="f">append</span>(<span class="k">true</span>).<span class="f">open</span>(path)?;
+        Ok(Self { w: BufWriter::<span class="f">new</span>(f) })
+    }
+
+    <span class="c">/// 编码一条 Put record 并写入（尚未 fsync，见 sync）。</span>
+    <span class="k">pub fn</span> <span class="f">append</span>(&<span class="k">mut</span> self, key: &[<span class="t">u8</span>], val: &[<span class="t">u8</span>]) -> Result&lt;()&gt; {
+        <span class="c">// 先拼 payload</span>
+        <span class="k">let</span> <span class="k">mut</span> payload = Vec::<span class="f">with_capacity</span>(1 + 4 + key.<span class="f">len</span>() + 4 + val.<span class="f">len</span>());
+        payload.<span class="f">push</span>(TAG_PUT);
+        payload.<span class="f">extend_from_slice</span>(&(key.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>());
+        payload.<span class="f">extend_from_slice</span>(key);
+        payload.<span class="f">extend_from_slice</span>(&(val.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>());
+        payload.<span class="f">extend_from_slice</span>(val);
+        <span class="c">// 帧头 = crc(payload) + len，再写 payload</span>
+        <span class="k">let</span> crc = crc32fast::<span class="f">hash</span>(&payload);
+        self.w.<span class="f">write_all</span>(&crc.<span class="f">to_le_bytes</span>())?;
+        self.w.<span class="f">write_all</span>(&(payload.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>())?;
+        self.w.<span class="f">write_all</span>(&payload)?;
+        Ok(())
+    }
+
+    <span class="c">/// 把缓冲刷给 OS，再 fsync 强制落物理介质。</span>
+    <span class="c">/// 这一步才是"持久"的真正边界——见核心问题 2。</span>
+    <span class="k">pub fn</span> <span class="f">sync</span>(&<span class="k">mut</span> self) -> Result&lt;()&gt; {
+        self.w.<span class="f">flush</span>()?;            <span class="c">// BufWriter -&gt; OS page cache</span>
+        self.w.<span class="f">get_ref</span>().<span class="f">sync_all</span>()?; <span class="c">// OS -&gt; 磁盘 (fsync)</span>
+        Ok(())
+    }
+}</pre>
+
+  <h2>Harness 系统 ④：故障注入</h2>
+  <div class="harness">
+    <div class="kicker">为什么这里用故障注入</div>
+    <p style="margin:.3em 0 0">校验和的存在意义只有一个：<strong>检出损坏</strong>。可正常测试里数据永远不坏，校验和这段代码从不被真正考验——它可能写错了你都不知道。
+    办法：<strong>主动往磁盘上的字节里翻一个 bit</strong>，断言"这条 record 必须被识别为坏、不被当好数据读回"。不制造坏，就验不了"抗坏"。这是 RocksDB <code>fault_injection_fs</code> 的核心思想。</p>
+  </div>
+
+  <h3>代码 2 — 故障注入 harness（接 <code>wal.rs</code> 末尾）</h3>
+  <p style="font-size:.9em;color:var(--soft)">注：这条 harness 依赖 B2 的 <code>Wal::replay</code> 来"读回并验校验和"。若你先做 B1，可先写一个最小的"读帧+验crc"内联函数；或按建议把 B1+B2 连着做，本测试放完整后跑。下面假设 <code>replay</code> 已就位。</p>
+  <pre><span class="c">#[cfg(test)]</span>
+<span class="k">mod</span> tests {
+    <span class="k">use</span> super::*;
+    <span class="k">use</span> tempfile::tempdir; <span class="c">// 已在 dev-dependencies</span>
+    <span class="k">use</span> bytes::Bytes;
+
+    <span class="c">// 故障注入：翻转最后一条 record 的尾字节 → crc 必须把它挡掉</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">corruption_caught_at_tail</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"t.log"</span>);
+        {
+            <span class="k">let</span> <span class="k">mut</span> w = Wal::<span class="f">open_append</span>(&path).<span class="f">unwrap</span>();
+            w.<span class="f">append</span>(b<span class="s">"good"</span>, b<span class="s">"1"</span>).<span class="f">unwrap</span>();
+            w.<span class="f">append</span>(b<span class="s">"bad"</span>,  b<span class="s">"2"</span>).<span class="f">unwrap</span>();
+            w.<span class="f">sync</span>().<span class="f">unwrap</span>();
+        }
+        <span class="c">// —— 注入故障：读出原始字节，翻转最后一字节，写回 ——</span>
+        <span class="k">let</span> <span class="k">mut</span> raw = std::fs::<span class="f">read</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">let</span> n = raw.<span class="f">len</span>();
+        raw[n - 1] ^= <span class="s">0xFF</span>; <span class="c">// 改第二条 record 的 value 字节</span>
+        std::fs::<span class="f">write</span>(&path, &raw).<span class="f">unwrap</span>();
+
+        <span class="c">// 断言：第一条完好被读回，第二条因 crc 不符被丢</span>
+        <span class="k">let</span> recs = Wal::<span class="f">replay</span>(&path).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(recs.<span class="f">len</span>(), 1, <span class="s">"损坏record没被挡住!"</span>);
+        <span class="f">assert_eq!</span>(recs[0], (Bytes::<span class="f">from</span>(<span class="s">"good"</span>), Bytes::<span class="f">from</span>(<span class="s">"1"</span>)));
+    }
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test wal</div>
+  <div class="done"><div class="kicker">看到这个就过（连 B2 做完后）</div><p style="margin:.3em 0 0"><code>test wal::tests::corruption_caught_at_tail ... ok</code></p></div>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">想清楚再进 B2</div>
+    <ol>
+      <li><strong>write-ahead 的"ahead"</strong>：为什么必须 WAL 先落、MemTable 后写？把顺序反过来，崩在两步之间，重启后会出现什么"幽灵"或"丢失"？（B2 的 <code>Engine::put</code> 把这个顺序钉死。）</li>
+      <li><strong><code>sync</code> 才是持久边界</strong>：<code>append</code> 之后、<code>sync</code> 之前崩溃，数据在哪？(BufWriter 缓冲 / OS page cache / 磁盘——分别在哪一层)。<code>flush</code> 和 <code>fsync</code> 分别把数据推到哪一层？只 <code>flush</code> 不 <code>fsync</code>，断电会怎样？</li>
+      <li><strong>校验和能防什么、不能防什么</strong>：crc32 能检出"位翻转"，但能检出"整条 record 被对调顺序"吗？能检出"少写了一整条"吗？RocksDB 为此在 record 里还放了什么（提示：log number / seq）？</li>
+      <li><strong>为什么是小端、定长</strong>：跨机器搬这个 WAL 文件（大端机器）会怎样？RocksDB 怎么处理字节序可移植性？u32 定长 vs varint，省的那几字节在 key 很短时占比多大？</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/log_writer.cc">log_writer.cc</a> 读 <code>AddRecord:87</code> / <code>EmitPhysicalRecord:309</code> ·
+       <a href="https://github.com/facebook/rocksdb/blob/main/db/log_format.h">log_format.h</a> 看 header 布局 ·
+       <a href="https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format">Wiki: WAL Format</a>。</p>
+    <p><strong>下一步.</strong> 写端能落盘 → <a href="b2-reader-recovery.html">B2：读回来、容忍残尾、接进 Engine 做崩溃恢复</a>，学第五种 harness：崩溃恢复。</p>
+    <p>不清楚的随时问我。</p>
+  </div>
+</div>
+</body>
+</html>

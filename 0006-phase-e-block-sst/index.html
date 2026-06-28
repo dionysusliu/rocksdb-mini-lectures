@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase E · block-based SST — mini-LSM 自建引擎</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.2em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:34px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:23px;margin:2.2em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:18px;margin:1.6em 0 .4em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2);text-decoration:none;border-bottom:1px solid #bcd}
+  a:hover{background:#eef4f8}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:19px;color:#333}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:16px 20px;margin:1.4em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:4px;font-size:.95em}
+  .cards{display:grid;gap:14px;margin:1.2em 0}
+  .card{display:block;border:1px solid var(--rule);border-radius:6px;padding:18px 20px;background:#fff;color:var(--ink)}
+  .card:hover{border-color:var(--accent);box-shadow:0 3px 14px rgba(0,0,0,.06)}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;color:var(--accent);letter-spacing:.1em}
+  .card h3{margin:.2em 0 .3em;color:var(--ink)}
+  .card p{margin:.2em 0;font-size:.92em;color:var(--soft)}
+  .meta{font-family:ui-monospace,monospace;font-size:.78em;color:var(--soft);margin-top:.6em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:12px 18px;border-radius:6px;font-size:.92em}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:10px 18px;border-radius:4px;margin:1em 0}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0005-phase-d-readpath/index.html">Phase D</a> &nbsp;·&nbsp; Phase E</div>
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0006</div>
+  <h1>Phase E — block-based SST(零拷贝读的地基)</h1>
+  <p class="lede">M1 MVP 已闭环,但 Phase C/D 的 SST 有两个粗暴假设:<strong>每条 entry 一个索引项</strong>(索引和数据一样大)、<strong>整文件一次性读进内存</strong>(<code>raw: Vec&lt;u8&gt;</code>)。这一阶段把 SST 改造成真正 RocksDB 的形状——<strong>数据切成块(block)、稀疏索引每块一条、点查只读那一块</strong>。读放大从 O(整文件) 降到 O(一块);并第一次确立 <strong>零拷贝</strong>:块作为一个 <code>bytes::Bytes</code> 载入,查找返回<strong>借入这段缓冲的 <code>&amp;[u8]</code></strong>。这是 Phase F(迭代器)、Phase G(归并迭代器)要踩的地基。</p>
+
+  <div class="mission">
+    <strong>Mission 锚点.</strong> "块"是存储引擎与操作系统之间的<strong>共同货币</strong>:磁盘按扇区、文件系统按 block、OS page cache 按页(4KB)、数据库按 page——读写的最小单位都不是"一条记录"而是"一块"。RocksDB 的 <code>block_size</code> 默认 4KB,正是为了对齐这一层硬件/OS 现实。本阶段让我们的 SST 也长出"块"这个单位,以及定位块的 <code>BlockHandle</code> 与稀疏索引,对标 RocksDB 的 <code>BlockBuilder</code> / <code>BlockHandle</code> / <code>IndexBuilder</code>。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">本 Lab 宣称的 GOAL</div>
+    <ol style="margin:.4em 0">
+      <li><strong>块格式</strong>:<code>BlockBuilder</code>(升序 add → finish 成 <code>Bytes</code>)+ <code>Block</code>(<code>get(&amp;[u8]) -&gt; Option&lt;&amp;[u8]&gt;</code>,块内二分,返回<strong>借入块缓冲</strong>的切片)。块布局 = entries + offsets 数组 + 末尾 count。</li>
+      <li><strong>block-based SST + 稀疏索引</strong>:<code>SstBuilder</code> 把 entry 攒进当前块,超 <code>BLOCK_SIZE</code> 就封口成 data block、记一条 <code>(末键, BlockHandle)</code> 稀疏索引;<code>finish</code> 写 <code>[data blocks][index block][footer]</code>。<code>SstReader</code> 只载入稀疏索引,<code>get</code> 二分定位<strong>唯一候选块</strong>、<strong>只读那一块</strong>。</li>
+    </ol>
+    <p style="margin:.4em 0 0"><strong>Done when:</strong> <code>cargo test</code> 全绿,含<strong>零拷贝借用</strong>(返回切片指向块缓冲)、<strong>读放大不变量</strong>(一次点查只读一块)、<strong>跨块边界键</strong>、<strong>差分 vs BTreeMap</strong>。引擎旧测试不动照过(块化完全封装在 SST 模块内)。</p>
+  </div>
+
+  <div class="milestone">🏁 <strong>本 Lab 不改对外行为,改的是 SST 的"骨相"</strong>:get 结果与 Phase D 一字不差,但读放大和内存占用从此走对了路。这是性能弧线的起点(Phase S block cache、Phase F 零拷贝迭代都建在它上面)。</div>
+
+  <h3>一图看清:从"全量索引整文件载入" → "块 + 稀疏索引"</h3>
+  <svg viewBox="0 0 700 250" font-family="ui-monospace,monospace" font-size="11">
+    <text x="10" y="20" fill="#7a3b2e" font-size="12">Phase C/D:每 entry 一个索引项,整文件载入</text>
+    <rect x="10" y="30" width="320" height="30" fill="#fcf3ee" stroke="#c98a6a"/>
+    <text x="170" y="50" text-anchor="middle" fill="#7a3b2e">data: e0 e1 e2 e3 e4 e5 e6 e7 ... (全读进 raw)</text>
+    <rect x="340" y="30" width="200" height="30" fill="#f4f1e8" stroke="#c9a25a"/>
+    <text x="440" y="50" text-anchor="middle" fill="#8a5a12">index: 每条一项(和数据一样多)</text>
+
+    <text x="10" y="105" fill="#2e5d7a" font-size="12">Phase E:数据切块,稀疏索引每块一条,只读候选块</text>
+    <rect x="10" y="115" width="80" height="34" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="50" y="136" text-anchor="middle" fill="#3a5a2a">block0</text>
+    <rect x="92" y="115" width="80" height="34" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="132" y="136" text-anchor="middle" fill="#3a5a2a">block1</text>
+    <rect x="174" y="115" width="80" height="34" fill="#fff7d6" stroke="#7a9a5a" stroke-width="2"/>
+    <text x="214" y="136" text-anchor="middle" fill="#3a5a2a">block2 ←读这块</text>
+    <rect x="256" y="115" width="80" height="34" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="296" y="136" text-anchor="middle" fill="#3a5a2a">block3</text>
+    <rect x="350" y="115" width="190" height="34" fill="#f4f1e8" stroke="#c9a25a"/>
+    <text x="445" y="136" text-anchor="middle" fill="#8a5a12">index:每块末键→handle(稀疏)</text>
+
+    <rect x="10" y="175" width="160" height="30" fill="#fff" stroke="#2e5d7a"/>
+    <text x="90" y="195" text-anchor="middle" fill="#2e5d7a">get("k") 二分稀疏索引</text>
+    <line x1="170" y1="190" x2="300" y2="190" stroke="#2e5d7a" marker-end="url(#a)"/>
+    <text x="235" y="183" text-anchor="middle" fill="#2e5d7a" font-size="10">定位唯一候选块</text>
+    <rect x="300" y="175" width="240" height="30" fill="#fff7d6" stroke="#7a9a5a"/>
+    <text x="420" y="195" text-anchor="middle" fill="#3a5a2a">只读 block2 → 块内二分 → value</text>
+    <text x="270" y="230" fill="#888" font-size="11">读放大:从 O(整文件) → O(一块)。这条铁律是后续 bloom / block cache 的前提。</text>
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#2e5d7a"/></marker></defs>
+  </svg>
+
+  <h2>路线:五个最小步</h2>
+  <p style="font-size:.92em;color:var(--soft)">E1/E2 把 SST 块化(已出);E3 用基准<strong>实测</strong>块化的代价与收益,并<strong>暴露</strong>两处待补的洞(热点查慢、热块重复读);E4/E5 把洞补上——E4 让<strong>数据区</strong>第一次缩水(前缀压缩),E5 叠加压缩 + 完整性(块尾 CRC)。基准(E3)是贯穿后三步的<strong>度量尺</strong>:每加一个机制,回 E3 重跑,看数字往哪走。</p>
+  <div class="cards">
+    <a class="card" href="e1-block-format.html">
+      <div class="step">STEP E1 · done</div>
+      <h3>块格式 + 零拷贝读</h3>
+      <p>新建 <code>block.rs</code>:<code>BlockBuilder</code>(升序 add / finish→Bytes)+ <code>Block</code>(块内二分,<code>get</code> 返回借入块缓冲的 <code>&amp;[u8]</code>)。布局 = entries + offsets + count。restart_interval=1,前缀压缩留作 E4。对标 <code>block_builder.cc</code>。</p>
+      <div class="meta">harness 系统:<strong>round-trip + 零拷贝借用断言</strong></div>
+    </a>
+    <a class="card" href="e2-block-sst.html">
+      <div class="step">STEP E2 · done</div>
+      <h3>block-based SST + 稀疏索引</h3>
+      <p>重写 <code>sst.rs</code>:攒块→超阈值封口→记 <code>(末键, BlockHandle)</code> 稀疏索引;<code>finish</code> 写 <code>[data][index][footer]</code>。<code>get</code> 二分索引定位唯一候选块、只读那一块。引擎零改动。对标 <code>BlockBasedTableBuilder</code> / <code>IndexBuilder</code>。</p>
+      <div class="meta">harness 系统:<strong>读放大不变量 + 差分 + 跨块边界</strong></div>
+    </a>
+    <a class="card" href="e3-bench.html">
+      <div class="step">STEP E3</div>
+      <h3>基准:flat vs block 的 A/B</h3>
+      <p>冻结 Phase D 扁平 SST 为 <code>sst_flat.rs</code> 基线,新建 <code>nocache.rs</code>(手写 <code>F_NOCACHE</code> 冷读)+ <code>bin/bench.rs</code>(手写 SplitMix64 + 正确性闸门)。同一二进制跑两版,实测<strong>磁盘 / 索引内存 / 读延迟(冷热)</strong>。对标 <code>db_bench</code>。<strong>诚实印出块化在热点查上反而略慢。</strong></p>
+      <div class="meta">harness 系统:<strong>A/B 差分闸门 + 测量方法学(冷热/摊薄/what+why)</strong></div>
+    </a>
+    <a class="card" href="e4-restart-prefix.html">
+      <div class="step">STEP E4</div>
+      <h3>restart points + 前缀键压缩</h3>
+      <p>兑现 E1 留的坑:块内每 K 条设一个 restart 点存完整 key,其余 entry 只存<strong>共享前缀长度 + 后缀</strong>。排序键前缀高度相似 → <strong>数据区第一次缩水</strong>,块内查找靠 restart 数组仍能二分。回 E3 重跑看磁盘续降。对标 <code>block_builder.cc</code> restart。</p>
+      <div class="meta">harness 系统:<strong>前缀重建差分 + restart 边界 + 块大小扫</strong></div>
+    </a>
+    <a class="card" href="e5-block-trailer.html">
+      <div class="step">STEP E5</div>
+      <h3>块尾:CRC + 压缩(lz4)</h3>
+      <p>每块加 RocksDB 式<strong>块尾</strong> <code>[type:1][crc32:4]</code>:type 记压缩算法,crc 读时校验完整性。<code>lz4_flex</code> 压<strong>数据块</strong>(可开关)。磁盘空间的赢面在此<strong>叠满</strong>;读路径多付解压 + 校验 CPU——回 E3 量化这笔账。对标 RocksDB <code>BlockTrailer</code> + <code>CompressionType</code>。</p>
+      <div class="meta">harness 系统:<strong>压缩 round-trip + CRC 故障注入 + 压缩率/读 CPU 权衡</strong></div>
+    </a>
+  </div>
+
+  <h2>本 Lab 的 harness 主题:不变量(invariant)与读放大</h2>
+  <p>块化改造的危险在于:<strong>对外行为必须一字不变,内部布局却天翻地覆</strong>。差分(vs BTreeMap)证明"结果没变";而真正新增的检验是<strong>读放大不变量</strong>——我们给 <code>SstReader</code> 埋一个 <code>blocks_read</code> 计数器,断言"无论文件被切成多少块,一次点查最多读一块"。这把一个<strong>性能契约</strong>变成了可执行的测试,而不是口头承诺。</p>
+  <table>
+    <thead><tr><th>Harness 系统</th><th>抓什么</th><th>用在</th></tr></thead>
+    <tbody>
+      <tr><td><strong>round-trip</strong></td><td>build→finish→decode 后每条可读、顺序不变、空 value 不丢</td><td>E1</td></tr>
+      <tr><td><strong>零拷贝借用断言</strong></td><td><code>get</code> 返回的切片指针必须落在块缓冲地址区间内(是借用,不是新分配的副本)</td><td>E1</td></tr>
+      <tr><td><strong>读放大不变量</strong></td><td>多块文件,一次点查 <code>blocks_read</code> 增量恰为 1(miss 越界则为 0)</td><td>E2</td></tr>
+      <tr><td><strong>差分 vs oracle + 跨块边界</strong></td><td>强制多块,SST.get == BTreeMap.get;每块首键/末键都命中(partition_point 临界)</td><td>E2</td></tr>
+    </tbody>
+  </table>
+
+  <div class="ask">
+    <strong>带着这个问题进 E1</strong>:为什么块的 offsets 数组要放在<strong>块尾</strong>、而且末尾还要再写一个 count?(提示:写的时候 entry 是流式追加、长度未知;读的时候要能<strong>反向</strong>定位到 offsets 数组的起点。想想为什么 ZIP 的中央目录也在文件尾、为什么 SST footer 在文件尾——"<strong>定长尾巴指向变长正文</strong>"是个反复出现的格式设计套路。)
+  </div>
+
+  <div class="foot">
+    <p><strong>前置.</strong> Phase A–D 就位、<code>cargo test</code> 绿(M1 MVP 已闭环)。本 Lab <strong>新建 <code>block.rs</code> + 重写 <code>sst.rs</code></strong>;<code>engine.rs</code> 一行不改(块化封装在 SST 模块边界内),<code>lib.rs</code> 加一行 <code>pub mod block;</code>。卡住可对照 worktree 的 <code>reference/block.rs</code> / <code>reference/sst.rs</code>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_builder.cc">block_builder.cc</a>(块布局注释 :30–32、<code>Finish</code> :189、<code>Add</code> :222)· <a href="https://github.com/facebook/rocksdb/blob/main/table/format.h">format.h</a>(<code>class BlockHandle</code> :53、<code>class Footer</code> :236)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/flush_block_policy.cc">flush_block_policy.cc</a>(按大小封块 :50)。</p>
+    <p><strong>卡住了问我.</strong></p>
+  </div>
+</div>
+</body>
+</html>

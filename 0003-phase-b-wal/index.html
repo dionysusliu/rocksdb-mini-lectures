@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase B · WAL — mini-LSM 自建引擎</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 28px 120px}
+  .kicker{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:34px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:23px;margin:2.2em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:18px;margin:1.6em 0 .4em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2);text-decoration:none;border-bottom:1px solid #bcd}
+  a:hover{background:#eef4f8}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:19px;color:#333}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:16px 20px;margin:1.4em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:4px;font-size:.95em}
+  .cards{display:grid;gap:14px;margin:1.2em 0}
+  .card{display:block;border:1px solid var(--rule);border-radius:6px;padding:18px 20px;background:#fff;transition:.12s;color:var(--ink);border-bottom:1px solid var(--rule)}
+  .card:hover{border-color:var(--accent);box-shadow:0 3px 14px rgba(0,0,0,.06);background:#fff}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;color:var(--accent);letter-spacing:.1em}
+  .card h3{margin:.2em 0 .3em;color:var(--ink)}
+  .card p{margin:.2em 0;font-size:.92em;color:var(--soft)}
+  .meta{font-family:ui-monospace,monospace;font-size:.78em;color:var(--soft);margin-top:.6em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .pill{display:inline-block;font-family:ui-monospace,monospace;font-size:.72em;padding:2px 8px;border-radius:20px;background:#eee;color:#555;border:1px solid #ddd}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:12px 18px;border-radius:6px;font-size:.92em}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0003</div>
+  <h1>Phase B — WAL</h1>
+  <p class="lede">给引擎装上"断电不丢"。写入先落 write-ahead log，再进 MemTable；重启时重放日志恢复。Phase A 的内存表第一次有了持久的底。</p>
+
+  <div class="mission">
+    <strong>Mission 锚点.</strong> 你在 learning-record 0004/0005 读过 RocksDB 写路径 <code>WriteBatch → WAL → MemTable</code>。
+    Phase A 做完了链尾的 MemTable；本 Lab 补上链中那道<strong>持久化关卡</strong>。
+    做完，断电后 <code>get</code> 仍读得到断电前 <code>put</code> 的值——这是存储引擎和"一个 HashMap"的分水岭。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">本 Lab 宣称的 GOAL</div>
+    <p style="margin:.4em 0 0">交付一个 <code>Engine</code>，<code>open(dir)</code> / <code>put</code> / <code>get</code> 三个 API，满足：</p>
+    <ol style="margin:.4em 0">
+      <li><strong>持久</strong>：<code>put</code> 返回后，进程崩溃 + 重开，该写入仍在。</li>
+      <li><strong>顺序无关正确</strong>：重放恢复后，每个 key 读到最后写入值（含覆盖写）。</li>
+      <li><strong>残record不致命</strong>：日志尾部被撕裂（torn write）时，恢复出完整前缀、丢掉残record、不 panic。</li>
+    </ol>
+    <p style="margin:.4em 0 0"><strong>Done when:</strong> <code>cargo test</code> 全绿，含崩溃恢复 harness 与故障注入 harness。</p>
+  </div>
+
+  <h3>一图看清这一步加在哪</h3>
+  <svg viewBox="0 0 700 140" font-family="ui-monospace,monospace" font-size="12">
+    <rect x="10" y="50" width="90" height="40" rx="6" fill="#fff" stroke="#7a3b2e"/>
+    <text x="55" y="74" text-anchor="middle" fill="#7a3b2e">put(k,v)</text>
+    <line x1="100" y1="70" x2="140" y2="70" stroke="#999" marker-end="url(#a)"/>
+    <rect x="140" y="42" width="150" height="56" rx="6" fill="#fcf3ee" stroke="#7a3b2e" stroke-width="2"/>
+    <text x="215" y="34" text-anchor="middle" fill="#7a3b2e" font-weight="bold">① WAL append+fsync</text>
+    <text x="215" y="66" text-anchor="middle" fill="#555">本 Lab 新增</text>
+    <text x="215" y="84" text-anchor="middle" fill="#888" font-size="10">先落盘才算数</text>
+    <line x1="290" y1="70" x2="330" y2="70" stroke="#999" marker-end="url(#a)"/>
+    <rect x="330" y="42" width="140" height="56" rx="6" fill="#f4f1e8" stroke="#aaa"/>
+    <text x="400" y="34" text-anchor="middle" fill="#888">② MemTable insert</text>
+    <text x="400" y="74" text-anchor="middle" fill="#888">Phase A</text>
+    <line x1="470" y1="70" x2="510" y2="70" stroke="#999" marker-end="url(#a)"/>
+    <rect x="510" y="50" width="80" height="40" rx="6" fill="#fff" stroke="#3a6b3a"/>
+    <text x="550" y="74" text-anchor="middle" fill="#3a6b3a">ack</text>
+    <text x="350" y="125" fill="#9a6a1a" font-size="11">重启: WAL replay → 重建 MemTable</text>
+    <path d="M400 98 Q400 118 370 118" fill="none" stroke="#9a6a1a" stroke-dasharray="3" marker-end="url(#b)"/>
+    <defs>
+      <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#999"/></marker>
+      <marker id="b" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#9a6a1a"/></marker>
+    </defs>
+  </svg>
+
+  <h2>路线：两个最小步</h2>
+  <div class="cards">
+    <a class="card" href="b1-wal-record-format.html">
+      <div class="step">STEP B1</div>
+      <h3>WAL record 格式 + Writer</h3>
+      <p>设计一条记录的字节布局（校验和 + 长度 + 负载），写 <code>Wal::append</code> 把一次 put 编码落盘。对标 log_writer.cc。</p>
+      <div class="meta">harness 系统：<strong>故障注入（翻位 → 校验和必抓）</strong></div>
+    </a>
+    <a class="card" href="b2-reader-recovery.html">
+      <div class="step">STEP B2</div>
+      <h3>Reader + 写路径 + 崩溃恢复</h3>
+      <p><code>Wal::replay</code> 解码流、容忍残尾；<code>Engine</code> 接线 WAL→MemTable，<code>open</code> 时重放恢复。对标 log_reader.cc / RecoverLogFiles。</p>
+      <div class="meta">harness 系统：<strong>崩溃恢复（写→崩→重开→验）</strong></div>
+    </a>
+  </div>
+
+  <h2>本 Lab 的 harness 主题：把"坏"主动制造出来</h2>
+  <p>Phase A 验的是"正常输入下对不对"。存储引擎真正的考场是<strong>异常</strong>：断电、半截写、磁盘翻位。这类 bug 不会自己冒头——你得<strong>主动注入故障</strong>去逼它现形。两种工业级 harness：</p>
+  <table>
+    <thead><tr><th>Harness 系统</th><th>制造什么坏</th><th>验什么</th></tr></thead>
+    <tbody>
+      <tr><td><strong>故障注入</strong><br><span class="pill">fault injection</span></td>
+        <td>翻转日志里一个 bit / 改一个字节</td><td>校验和必须抓到，损坏record不被当好数据读进来</td></tr>
+      <tr><td><strong>崩溃恢复</strong><br><span class="pill">crash-recovery</span></td>
+        <td>写入后不优雅关闭就"崩"（drop + 重开）；截断日志尾模拟 torn write</td><td>已 ack 的写全在；残尾丢得干净、不 panic</td></tr>
+    </tbody>
+  </table>
+  <p>这两种是 RocksDB <code>db_stress</code> + <code>fault_injection_test</code> 的核心套路，纯可迁移到任何持久化系统。</p>
+
+  <div class="ask">
+    <strong>带着这个问题进 B1</strong>：为什么"WAL 先落盘、再写 MemTable"这个顺序不能反？如果先写 MemTable 再写 WAL，崩在两步之间会怎样？（这条规则叫 <em>write-ahead</em>，是名字的由来。）
+  </div>
+
+  <div class="foot">
+    <p><strong>前置.</strong> 需要 Phase A 的 <code>kv.rs</code> + <code>memtable.rs</code> 已就位、<code>cargo test</code> 绿。本 Lab 会新增 <code>wal.rs</code> + <code>engine.rs</code>，并往 <code>Cargo.toml</code> 加一个依赖。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/log_format.h">log_format.h</a>（record 布局）·
+       <a href="https://github.com/facebook/rocksdb/wiki/Write-Ahead-Log-File-Format">RocksDB Wiki: WAL File Format</a> ·
+       <a href="https://skyzh.github.io/mini-lsm/week1-04-sst.html">skyzh mini-lsm</a>（WAL 在 week2 day2，但结构可参考）。</p>
+    <p><strong>卡住了问我.</strong></p>
+  </div>
+
+</div>
+</body>
+</html>

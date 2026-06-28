@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase A · MemTable — mini-LSM 自建引擎</title>
+<style>
+  :root{
+    --ink:#1a1a1a; --paper:#fdfcf9; --rule:#d9d4c7; --soft:#6b6453;
+    --accent:#7a3b2e; --accent2:#2e5d7a; --code-bg:#f4f1e8; --good:#3a6b3a; --warn:#9a6a1a;
+  }
+  *{box-sizing:border-box}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    line-height:1.62; margin:0; padding:0;
+  }
+  .wrap{max-width:760px; margin:0 auto; padding:64px 28px 120px}
+  .kicker{font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--soft)}
+  h1{font-size:34px; line-height:1.2; margin:.2em 0 .1em; letter-spacing:-.01em}
+  h2{font-size:23px; margin:2.2em 0 .5em; border-bottom:1px solid var(--rule); padding-bottom:.25em}
+  h3{font-size:18px; margin:1.6em 0 .4em; color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2); text-decoration:none; border-bottom:1px solid #bcd}
+  a:hover{background:#eef4f8}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:.88em; background:var(--code-bg);
+    padding:1px 5px; border-radius:4px}
+  .lede{font-size:19px; color:#333}
+  .goal{background:#fff; border:1px solid var(--rule); border-left:4px solid var(--accent);
+    padding:16px 20px; margin:1.4em 0; border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3; border:1px solid #cfe0d2; padding:12px 18px; border-radius:4px; font-size:.95em}
+  .cards{display:grid; gap:14px; margin:1.2em 0}
+  .card{display:block; border:1px solid var(--rule); border-radius:6px; padding:18px 20px; background:#fff;
+    transition:.12s; color:var(--ink)}
+  .card:hover{border-color:var(--accent); box-shadow:0 3px 14px rgba(0,0,0,.06); background:#fff}
+  .card .step{font-family:ui-monospace,monospace; font-size:12px; color:var(--accent); letter-spacing:.1em}
+  .card h3{margin:.2em 0 .3em; color:var(--ink)}
+  .card p{margin:.2em 0; font-size:.92em; color:var(--soft)}
+  .meta{font-family:ui-monospace,monospace; font-size:.78em; color:var(--soft); margin-top:.6em}
+  table{border-collapse:collapse; width:100%; margin:1em 0; font-size:.9em}
+  th,td{border:1px solid var(--rule); padding:7px 11px; text-align:left; vertical-align:top}
+  th{background:var(--code-bg)}
+  .pill{display:inline-block; font-family:ui-monospace,monospace; font-size:.72em; padding:2px 8px;
+    border-radius:20px; background:#eee; color:#555; border:1px solid #ddd}
+  .foot{margin-top:3em; padding-top:1em; border-top:1px solid var(--rule); font-size:.85em; color:var(--soft)}
+  .ask{background:#fbf6ee; border:1px dashed var(--warn); padding:12px 18px; border-radius:6px; font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0002</div>
+  <h1>Phase A — MemTable</h1>
+  <p class="lede">从零手写 LSM 引擎的第一块：内存写缓冲。能写、能查、知道自己多大、会喊"我满了"。</p>
+
+  <div class="mission">
+    <strong>Mission 锚点.</strong> 这是 mission 第四段「参考 RocksDB 架构从零实现简化版 LSM 引擎」的起点。
+    你已读过 RocksDB 写路径源码（learning-record 0004/0005）——
+    <code>WriteBatch → WAL → MemTable</code>。MemTable 是那条链的终点，也是读路径第一站。
+    先把它单独跑通，WAL（Phase B）只是在前面加持久化，flush（Phase C）只是把它倒进 SST。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">本 Lab 宣称的 GOAL</div>
+    <p style="margin:.4em 0 0">交付一个 <code>MemTable</code> 类型，满足三条可验证断言：</p>
+    <ol style="margin:.4em 0">
+      <li><strong>正确</strong>：任意 put 序列后，get 返回每个 key 的最后写入值；缺失 key 返回 <code>None</code>。</li>
+      <li><strong>有序</strong>：底层按字节序维护 key 顺序（为后续 flush 成有序 SST、范围扫描铺路）。</li>
+      <li><strong>自知</strong>：能报告近似内存占用，并在超过阈值时回答 <code>is_full() == true</code>。</li>
+    </ol>
+    <p style="margin:.4em 0 0"><strong>Done when:</strong> <code>cargo test</code> 全绿，且三类 harness（见下）各自就位。</p>
+  </div>
+
+  <h2>路线：三个最小步</h2>
+  <p>每步一节课，几十行代码，单独 <code>cargo test</code> 可验。按数据依赖排序——先有 key 的"序"，才能建有序表，才能谈"满"。</p>
+
+  <div class="cards">
+    <a class="card" href="a1-kv-types.html">
+      <div class="step">STEP A1</div>
+      <h3>KV 类型 + 比较器</h3>
+      <p>定义 <code>Key/Value</code> 与 <code>Comparator</code> trait，默认字节序实现。这是整个引擎的"序"之根。</p>
+      <div class="meta">对标 slice.h / comparator.cc · harness 系统：<strong>表驱动测试</strong></div>
+    </a>
+    <a class="card" href="a2-memtable.html">
+      <div class="step">STEP A2</div>
+      <h3>MemTable 点写读</h3>
+      <p>用 <code>crossbeam-skiplist</code> 包出 <code>put</code>/<code>get</code>。对标 RocksDB MemTable + InlineSkipList。</p>
+      <div class="meta">对标 memtable.cc / inlineskiplist.h · harness 系统：<strong>模型/差分测试 (oracle)</strong></div>
+    </a>
+    <a class="card" href="a3-size-freeze.html">
+      <div class="step">STEP A3</div>
+      <h3>内存计量 + 冻结门</h3>
+      <p>原子计数近似大小，<code>is_full(threshold)</code> 给出冻结信号。Phase B/C 都挂在这个信号上。</p>
+      <div class="meta">对标 ApproximateMemoryUsage:300 / ShouldFlushNow:319 · harness 系统：<strong>不变量检查</strong></div>
+    </a>
+  </div>
+
+  <h2>本 Lab 的第二主题：harness 设计</h2>
+  <p>你要练的不只是引擎，还有<strong>怎么证明引擎是对的</strong>。存储引擎的 bug 多是"低概率、状态依赖、静默损坏数据"——
+  靠肉眼读输出抓不到。三步分别教一种工业可迁移的 harness 系统：</p>
+
+  <table>
+    <thead><tr><th>Harness 系统</th><th>抓什么 bug</th><th>本 Lab 用在</th></tr></thead>
+    <tbody>
+      <tr><td><strong>表驱动测试</strong><br><span class="pill">table-driven</span></td>
+        <td>边界/分类遗漏。一份用例表，一段断言逻辑，加用例零成本。RocksDB/Go 标准库主力风格。</td><td>A1 比较器</td></tr>
+      <tr><td><strong>模型差分 (oracle)</strong><br><span class="pill">model-based</span></td>
+        <td>与"显然正确的参考实现"行为分叉。拿 <code>BTreeMap</code> 当 oracle，随机操作序列两边对拍。</td><td>A2 MemTable</td></tr>
+      <tr><td><strong>不变量检查</strong><br><span class="pill">invariant</span></td>
+        <td>违反"任何时刻都该成立"的性质（如大小单调、阈值边界）。RocksDB 满身 <code>assert</code> 即此道。</td><td>A3 大小/冻结</td></tr>
+    </tbody>
+  </table>
+
+  <div class="ask">
+    <strong>带着这些问题进 A1</strong>（每节课末尾留了核心问题，先别看答案，自己想）：
+    为什么 RocksDB 把"比较器"抽成可替换接口，而不是写死字节序？一个 <code>Comparator</code> 必须满足哪几条数学性质，违反会怎样？
+  </div>
+
+  <div class="foot">
+    <p><strong>教学纪律.</strong> 引擎代码（<code>rocksdb-mini/src/*.rs</code>）全部由你手写，我只展示 + 解释 + 事后 review，不直接改你的 <code>src</code>。命令也由你执行。</p>
+    <p><strong>一手源.</strong> <a href="https://skyzh.github.io/mini-lsm/week1-01-memtable.html">skyzh mini-lsm · Week 1 Day 1: MemTable</a>（结构脚手架）·
+       <a href="https://github.com/facebook/rocksdb/wiki/MemTable">RocksDB Wiki: MemTable</a>（设计权衡）。</p>
+    <p><strong>卡住了问我.</strong> 我是你这门课的老师——任何不清楚的，随时追问。</p>
+  </div>
+
+</div>
+</body>
+</html>

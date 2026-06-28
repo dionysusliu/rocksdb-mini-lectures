@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-LSM 自建引擎 · 总路线图</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;--prog:#b8862a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.55;margin:0}
+  .wrap{max-width:860px;margin:0 auto;padding:60px 28px 120px}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:34px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:21px;margin:2em 0 .3em;color:var(--accent)}
+  .tier-sub{font-size:13px;color:var(--soft);font-family:ui-monospace,monospace;margin:0 0 .6em}
+  p{margin:.6em 0}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.85em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:18px;color:#333}
+  table{border-collapse:collapse;width:100%;margin:.4em 0 1.2em;font-size:.86em}
+  th,td{border:1px solid var(--rule);padding:6px 9px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-size:.82em}
+  td.id{font-family:ui-monospace,monospace;font-weight:bold;color:var(--accent);white-space:nowrap}
+  .st{font-family:ui-monospace,monospace;font-size:.74em;padding:2px 7px;border-radius:20px;white-space:nowrap}
+  .done{background:#e3efe3;color:#2c5c2c;border:1px solid #b8d0b8}
+  .now{background:#fbf0d8;color:#8a5a12;border:1px solid #e0c890}
+  .todo{background:#eee;color:#777;border:1px solid #ddd}
+  .anchor{font-family:ui-monospace,monospace;font-size:.82em;color:var(--soft)}
+  .harn{color:var(--accent2);font-size:.82em}
+  .note{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:6px;font-size:.92em;margin:1em 0}
+  .legend{font-size:.82em;color:var(--soft);margin:.4em 0 1.4em}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:8px 16px;border-radius:4px;margin:.6em 0;font-size:.9em}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="kicker">阶段 4 · 自建引擎 · 总路线图</div>
+  <h1>从 RocksDB 架构造一个自己的 KV 存储引擎</h1>
+  <p class="lede">由浅入深的 ~36 个最小 phase。每个 phase 一个可验证成果、一处 RocksDB 源码锚、一种 harness。先跑通 MVP，再逐层逼近生产级。</p>
+
+  <div class="note">
+    <strong>读法.</strong> 这是活文档,随进度更新。每 phase 是一个最小步(几十~一两百行)。
+    <strong>里程碑</strong>把 phase 切成可独立运行的引擎版本——每到一个里程碑,你手上就有一个"能做更多事"的真引擎。
+    教学纪律不变:你手写全部 <code>.rs</code> + 跑命令;我写 lab HTML、维护 job-tmp 参考实现做累积编译验证。
+  </div>
+  <div class="legend">状态:<span class="st done">done</span> 已出 lab &nbsp; <span class="st now">now</span> 进行中 &nbsp; <span class="st todo">todo</span> 规划中 &nbsp;|&nbsp; harness 列 = 该 phase 重点教的可迁移测试系统</div>
+
+  <h2>每节课的五块（不只是写引擎）</h2>
+  <p>从 Phase C 起,每节课除了"造出零件",还把这次代码当四类<strong>可迁移技能</strong>的载体。引擎会忘,这四样跟你走。</p>
+  <table>
+    <tr><th style="width:18%">块</th><th>是什么 / 为什么</th></tr>
+    <tr><td>🎯 <strong>Goal + 代码</strong></td><td>宣称目标、手写的 Rust、要跑的命令。引擎本体。</td></tr>
+    <tr><td>🧰 <strong>Coding style</strong></td><td>这次代码体现的<strong>可迁移编程范式</strong>(builder 模式 / consuming self / 零拷贝解析 / RAII / let-chain / establish-new-before-destroy-old)。换语言换项目都用得上。</td></tr>
+    <tr><td>🧠 <strong>System mindset</strong></td><td>这次设计体现的<strong>可迁移系统思维</strong>,刻意<strong>跨域</strong>到 Linux / 存储 / 网络 / 算法 / HPC。LSM 只是载体,原理通用。</td></tr>
+    <tr><td>🧪 <strong>Harness 系统</strong></td><td>可迁移的<strong>测试系统</strong>(表驱动 / 模型差分 / 不变量 / 故障注入 / 崩溃恢复 / 格式 round-trip ...)。</td></tr>
+    <tr><td>🔄 <strong>CI/CD pattern</strong></td><td>逐课增量搭<strong>真流水线</strong>(GitHub Actions):test → fmt/clippy gate → cache/工件。把"自动化 infra"练成肌肉记忆。</td></tr>
+  </table>
+
+  <h2>三条横切学习弧（跨 phase 的可迁移知识地图）</h2>
+  <p class="tier-sub">这是你最在意的部分:不止学 LSM,而是把它当镜子照见通用系统知识。</p>
+
+  <h3>🧠 System mindset 弧（跨域到 Linux/存储/网络/算法/HPC）</h3>
+  <table>
+    <tr><th>phase</th><th>本课的系统思维</th><th>同一原理在别处</th></tr>
+    <tr><td class="id">C1</td><td>自描述文件格式 · footer/trailer 在尾</td><td class="anchor">ELF section header · ZIP 中央目录 · SQLite header · PDF xref</td></tr>
+    <tr><td class="id">C2</td><td>index/data 分离 · 有序数组二分 · 内存层级局部性</td><td class="anchor">B-tree · page cache · CPU cache line · DB 索引 · mmap</td></tr>
+    <tr><td class="id">C3</td><td>crash-consistency · write-ordering · "新副本就绪前不毁旧副本"</td><td class="anchor">FS journaling · atomic rename · fsync barrier · <strong>blue-green 部署</strong> · DB checkpoint</td></tr>
+    <tr><td class="id">D/G</td><td>归并 · 惰性合并 · 读时合并多个有序源</td><td class="anchor">外部排序 · merge sort · MapReduce shuffle · 多路日志合并</td></tr>
+    <tr><td class="id">H/J</td><td>MVCC · 不可变 + 版本号 = 无锁读历史</td><td class="anchor">Git 对象 · Datomic · Postgres MVCC · COW 快照 · RCU(Linux 内核)</td></tr>
+    <tr><td class="id">R</td><td>概率数据结构 · 用空间换"快速否定"</td><td class="anchor">Bloom(CDN/爬虫去重) · HyperLogLog · Count-Min Sketch</td></tr>
+    <tr><td class="id">S/T</td><td>缓存 · LRU · 局部性 · 容量 vs 命中率</td><td class="anchor">CPU cache · page cache · CDN · Redis · TLB</td></tr>
+    <tr><td class="id">U/V</td><td>批处理摊薄 · 无锁并发 · group commit</td><td class="anchor">网络 Nagle · GPU warp 合并访存(HPC) · binlog group commit · io_uring 批提交</td></tr>
+    <tr><td class="id">N/O/AF</td><td>后台异步 + 放大权衡(读/写/空间三角)</td><td class="anchor">GC 策略 · 调度器 · 网络拥塞控制权衡 · HPC roofline</td></tr>
+  </table>
+
+  <h3>🧰 Coding style 弧</h3>
+  <table>
+    <tr><th>phase</th><th>编程范式</th><th>可迁移到</th></tr>
+    <tr><td class="id">A</td><td>trait 抽象接口 · interior mutability(原子)</td><td class="anchor">依赖倒置 · 任意语言的接口/并发原语</td></tr>
+    <tr><td class="id">C1</td><td>builder 模式 · consuming <code>self</code> 终结 · let-chain · 不变量在构造点强制</td><td class="anchor">"make illegal states unrepresentable" · 任意 OOP/FP builder</td></tr>
+    <tr><td class="id">C2</td><td>零拷贝解析(slice into owned buf) · <code>Option</code> 组合子 · <code>?</code> 错误传播</td><td class="anchor">parser 设计 · Result/Either monad · 边界处才拷贝</td></tr>
+    <tr><td class="id">C3</td><td>RAII 资源生命周期 · establish-new-before-destroy-old(原子替换)</td><td class="anchor">double-buffer · COW · blue-green · 任意"安全切换"</td></tr>
+    <tr><td class="id">G/F</td><td>迭代器协议 · 惰性求值 · trait object 多态</td><td class="anchor">任意语言 iterator/generator · 流式处理</td></tr>
+    <tr><td class="id">L/U</td><td>命令模式(VersionEdit/WriteBatch)· 事件溯源</td><td class="anchor">CQRS · redo log · undo/redo 栈</td></tr>
+  </table>
+
+  <h3>🔄 CI/CD 弧（逐课把流水线搭起来）</h3>
+  <table>
+    <tr><th>phase</th><th>这课加的流水线能力</th><th>可迁移到</th></tr>
+    <tr><td class="id">C1</td><td>bootstrap:push/PR 触发 <code>cargo test</code> job(GitHub Actions)</td><td class="anchor">任意项目的"绿勾门禁"</td></tr>
+    <tr><td class="id">C2</td><td>质量门:<code>fmt --check</code> + <code>clippy -D warnings</code></td><td class="anchor">lint/format gate · pre-commit · 阻断式 CI</td></tr>
+    <tr><td class="id">C3</td><td>提速 + 工件:<code>rust-cache</code> + 测试/release 产物</td><td class="anchor">构建缓存 · artifact 上传 · tag 触发 release</td></tr>
+    <tr><td class="id">R/AF+</td><td>性能门:benchmark 回归 gate(接 storage-benchmark-lab)</td><td class="anchor">perf CI · 防性能退化 · canary</td></tr>
+    <tr><td class="id">M5</td><td>矩阵构建 / coverage / 多平台</td><td class="anchor">cross-platform CI · 覆盖率门</td></tr>
+  </table>
+  <div class="note">
+    <strong>CI/CD 落地说明.</strong> workflow yml 是 infra glue,我可展示+维护参考实现并本地验证(YAML 合法 + <code>cargo test/fmt/clippy</code> 真跑过)。
+    但<strong>真部署需要你把 <code>rocksdb-mini</code> push 到 GitHub</strong>(现无 remote/commit)。到 C1 时给你一键步骤:<code>git init</code> → 加 <code>.github/workflows/ci.yml</code> → push → 看 Actions 变绿。
+  </div>
+
+  <!-- TIER 1 -->
+  <h2>Tier 1 · MVP KV（Put / Get / 重启持久）</h2>
+  <p class="tier-sub">目标里程碑 M1:能 put/get、断电不丢、数据落有序文件。一个最小但完整的 LSM。</p>
+  <table>
+    <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
+    <tr><td class="id">A</td><td>MemTable(跳表点写读 + 计量/冻结)</td><td class="anchor">memtable.cc / inlineskiplist.h</td><td class="harn">表驱动·模型差分·不变量</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">B</td><td>WAL(record 格式 + 写路径 + 崩溃恢复)</td><td class="anchor">log_writer/reader.cc · RecoverLogFiles</td><td class="harn">故障注入·崩溃恢复</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">C</td><td>SST(有序不可变文件:builder + reader + flush)</td><td class="anchor">block_builder/table_builder.cc</td><td class="harn">格式稳定性·round-trip</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">D</td><td>读路径合并(memtable→immutable→SST 新到旧)→ <strong>触达 M1</strong></td><td class="anchor">db_impl.cc GetImpl · column_family.h SuperVersion · version_set.cc Version::Get</td><td class="harn">分层查找差分·重启重发现</td><td><span class="st now">now</span></td></tr>
+    <tr><td class="id" style="padding-left:24px">└ D1</td><td>读路径接 SST + 重启发现 *.sst(<code>Vec&lt;SstReader&gt;</code> 新到旧)</td><td class="anchor">db_impl.cc:3351 mem→imm→current</td><td class="harn">重启重发现(跨进程)</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id" style="padding-left:24px">└ D2</td><td>immutable 表层(<code>Vec&lt;Arc&lt;MemTable&gt;&gt;</code>)+ freeze + 三层查找</td><td class="anchor">column_family.h:207 SuperVersion</td><td class="harn">分层查找差分(旗舰)</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id" style="padding-left:24px">└ D3</td><td>满了自动 flush(接 A3 <code>is_full</code> 信号)</td><td class="anchor">SwitchMemtable + 后台 flush</td><td class="harn">自触发不变量</td><td><span class="st done">done</span></td></tr>
+  </table>
+  <div class="milestone">🏁 <strong>M1 — MVP 引擎</strong>:Put/Get/重启持久全通。这就是路线图开头我们说的"先跑通"。<strong>Phase D(D1/D2/D3 参考实现已 10 测试全绿)收尾即达成。</strong></div>
+
+  <!-- TIER 2 -->
+  <h2>Tier 2 · 核心 LSM 机制（多版本 / 删除 / 扫描）</h2>
+  <p class="tier-sub">把"覆盖即追加新版本"做真:引入序号与墓碑,支持删除、快照、范围扫描。</p>
+  <table>
+    <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
+    <tr><td class="id">E</td><td>block 化 SST + 基准 + 块尾压缩(data block / 稀疏索引 / A/B 实测 / 前缀压缩 / CRC+lz4)</td><td class="anchor">block_builder.cc · db_bench · BlockTrailer</td><td class="harn">格式·边界·性能 A/B</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ E1</td><td>块格式 + 零拷贝读(BlockBuilder / Block,块内二分,借入块缓冲)</td><td class="anchor">block_builder.cc :30 布局</td><td class="harn">round-trip·零拷贝借用</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ E2</td><td>block-based SST + 稀疏索引(攒块封口 / 末键路标 / 按需 read_exact_at)</td><td class="anchor">index_builder.h :80</td><td class="harn">读放大不变量·差分·跨块边界</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ E3</td><td>基准:flat vs block A/B(同二进制 / SplitMix64 / F_NOCACHE 冷读);磁盘 −15%·索引内存 24×·冷选择性读最高 33×,热点查诚实略慢</td><td class="anchor">db_bench_tool.cc</td><td class="harn">A/B 差分闸门·冷热/摊薄/what+why</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ E4</td><td>restart points + 前缀键压缩(数据区第一次缩水,块内仍可二分)</td><td class="anchor">block_builder.cc restart</td><td class="harn">前缀重建差分·restart 边界·块大小扫</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ E5</td><td>块尾:per-block CRC32 + 压缩(lz4_flex,type+crc trailer);磁盘赢面叠满,读路径付解压+校验 CPU</td><td class="anchor">format.h BlockTrailer · CompressionType</td><td class="harn">压缩 round-trip·CRC 故障注入·压缩率/读 CPU 权衡</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">F</td><td>迭代器:把每个数据源包成统一游标(LsmIterator 契约,裸 &amp;[u8],正向 only,比较规则外置)</td><td class="anchor">block_based_table_iterator · InternalIterator</td><td class="harn">迭代器契约·跨块边界·惰性读放大</td><td><span class="st now">now</span></td></tr>
+    <tr><td class="id">└ F1</td><td>LsmIterator trait + BlockIter(块内 seek/next,零拷贝;持 Arc&lt;Block&gt; 共享句柄,非 own/借用)</td><td class="anchor">block.cc BlockIter</td><td class="harn">契约:seek_to_first 升序·seek 落 ≥target</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ F2</td><td>SstIter:稀疏索引定位 + 跨块惰性扫描(两级游标)</td><td class="anchor">block_based_table_iterator</td><td class="harn">扫描差分·跨块边界·惰性读放大</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ F3</td><td>MemTableIter:skiplist 包成游标(持 crossbeam Entry&lt;'a&gt; 借用游标,O(log n) seek/O(1) next,非快照;弱一致由 H 的 seq 兜底)</td><td class="anchor">memtable iterator</td><td class="harn">契约·活游标·与 SstIter 同 trait 差分</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">G1</td><td>MergeIterator:纯 k 路归并(min-heap Reverse&lt;(key,idx)&gt;,plain key,源优先级去重;比较器外置,H3 再换)</td><td class="anchor">merging_iterator.cc</td><td class="harn">归并差分(vs 合并后 BTreeMap)·源优先级去重·跨源 seek</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ G2</td><td>minimal scan(start..end):plain-key 范围扫描对外 API(里程碑;K 再升级为快照/墓碑感知)</td><td class="anchor">db_iter.cc(雏形)</td><td class="harn">扫描差分 vs BTreeMap::range</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">H</td><td>InternalKey:user_key + seq + type;读写路径全穿 + 归并去重外置改 user_key(承 A1 张力)</td><td class="anchor">dbformat.h InternalKeyComparator</td><td class="harn">比较器属性·get≡scan首元素 差分</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ H1</td><td>InternalKey 字节可比编码(user_key‖be(MAX−seq)‖type;裸 Ord = user_key 升 / seq 降,零 comparator 穿线)</td><td class="anchor">dbformat.h</td><td class="harn">round-trip·排序契约·lookup_key 落最新</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ H2</td><td>seq 穿写+读+归并:put 分配 seq 存 InternalKey、WAL 存 ik、open 恢复 seq;get_newest;merge 去重外置改 user_key</td><td class="anchor">dbformat.h · write path</td><td class="harn">多版本去重·seq 跨重启单调</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">└ H3</td><td>墓碑 kTypeDeletion + delete() API;读路径(H2 已留 type 分支)遮蔽/跳过墓碑</td><td class="anchor">dbformat.h ValueType · GetImpl</td><td class="harn">墓碑藏/复活·跨层遮蔽·get≡scan首元素</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id" style="color:#999">~~I~~</td><td style="color:#999">墓碑独立 phase —— <strong>已折进 H3</strong>(type 字段 H1 即建,删除语义即读路径一分支,不单列)</td><td class="anchor">dbformat.h ValueType</td><td class="harn">—</td><td><span class="st done">折入 H3</span></td></tr>
+    <tr><td class="id">J</td><td>快照:snapshot()=独占上界 seq;get_as_of(k, snap) 点读历史版本(读路径 snap 参数化 + 修 lookup_key seek-type)</td><td class="anchor">snapshot.h / GetImpl</td><td class="harn">MVCC 时间旅行·跨 flush·未来不可见</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">K</td><td>范围扫描对外 API(DBIter:seek/next 正向;快照 + 墓碑感知;去重从 MergeIterator 归位到懂 seq 的 DBIter)</td><td class="anchor">db_iter.cc</td><td class="harn">范围时间旅行·跨 flush·scan≡get 多快照对拍</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id" style="color:#999">[高级]</td><td style="color:#999">反向迭代 prev / seek_to_last(每源回退 + merge 方向切换 + 反向重建前缀压缩 key)—— 不进主线,真要才做</td><td class="anchor">db_iter.cc Prev</td><td class="harn">双向方向切换差分</td><td><span class="st todo">todo</span></td></tr>
+  </table>
+  <div class="milestone">🏁 <strong>M2 — 多版本引擎</strong>:删除、快照读、范围扫描。语义对齐真 LSM。</div>
+
+  <!-- TIER 3 -->
+  <h2>Tier 3 · Compaction（你已有源码级基础）</h2>
+  <p class="tier-sub">这是你在阶段 3 改过源码的地方(L07 双层门控/Lab09 CompactionFilter)。现在从零造它。</p>
+  <table>
+    <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
+    <tr><td class="id">L</td><td>Manifest / Version / VersionEdit(记录哪些 SST 在哪层)</td><td class="anchor">version_set.cc / manifest</td><td class="harn">元数据崩溃恢复</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">M</td><td>分层布局:L0(可重叠) + L1..Ln(不重叠)</td><td class="anchor">version_storage_info</td><td class="harn">层不变量</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">N</td><td>compaction picker(选哪些文件)— 接 L07 双层门控</td><td class="anchor">compaction_picker_level.cc</td><td class="harn">选择正确性</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">O</td><td>compaction job(归并 SST、丢被覆盖/墓碑数据)</td><td class="anchor">compaction_job.cc</td><td class="harn">合并不丢/不复活</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">P</td><td>CompactionFilter 钩子(接 Lab09 TTL)</td><td class="anchor">compaction_filter.h</td><td class="harn">过滤副作用</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">Q</td><td>墓碑跨层 GC(底层才能真删)</td><td class="anchor">CompactionIterator bottommost</td><td class="harn">墓碑生命周期</td><td><span class="st todo">todo</span></td></tr>
+  </table>
+  <div class="milestone">🏁 <strong>M3 — 自管引擎</strong>:后台 compaction 控制读放大/空间放大。L05 放大三角第一次能自己实测调。</div>
+
+  <!-- TIER 4 -->
+  <h2>Tier 4 · 读写性能</h2>
+  <p class="tier-sub">让它快:跳过无用查找、缓存热数据、批量提交。并发写课题(你的 backlog)在此正式落地;capstone(T4★)把 M1 起的单线程同步引擎重构成 RocksDB 式后台线程模型,并做单线程 vs 多线程性能 A/B 对比。</p>
+  <table>
+    <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
+    <tr><td class="id">R</td><td>Bloom filter(每 SST,跳过不存在的 key)</td><td class="anchor">full_filter_block / util/bloom.cc</td><td class="harn">假阳率实测</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">S</td><td>Block cache(LRU,缓存解码块;接 E5 压缩)— <a href="0008-phase-s-block-cache/index.html">lab 已提前出</a></td><td class="anchor">lru_cache.cc</td><td class="harn">命中率·LRU 淘汰序·并发缓存</td><td><span class="st done">done</span></td></tr>
+    <tr><td class="id">T</td><td>Table cache(复用打开的文件句柄)</td><td class="anchor">table_cache.cc</td><td class="harn">句柄泄漏</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">U</td><td>WriteBatch(原子多键) + group commit(★并发 backlog 落地)</td><td class="anchor">write_batch.cc / write_thread.cc</td><td class="harn">原子性·并发压测</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">V</td><td>并发 memtable 写(并行插入,吃 A2 的无锁跳表)</td><td class="anchor">InsertKeyConcurrently</td><td class="harn">并发 oracle</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">W</td><td>write stall / 限速(写太快挡一下)</td><td class="anchor">write_controller.cc</td><td class="harn">背压行为</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">T4★</td><td><strong>线程模型重构 + 性能 A/B</strong>(综合 U/V/W 的 capstone)<br>① 同步内联 flush/compaction → <strong>后台线程池</strong>(flush worker + compaction worker + write-thread leader/follower);put/get 不再被慢 IO 堵<br>② <strong>★ 单线程同步模型 vs 多线程模型 基准对比</strong>:同一负载下吞吐/p99/写停顿 三指标实测对照</td><td class="anchor">db_impl_compaction_flush.cc · write_thread.cc(JoinBatchGroup) · env_posix 线程池</td><td class="harn">并发 oracle + <strong>性能 A/B(回归 gate)</strong></td><td><span class="st todo">todo</span></td></tr>
+  </table>
+  <div class="milestone">🏁 <strong>M4 — 性能引擎</strong>:bloom + cache + group commit + <strong>后台线程模型</strong>。M1 起的单线程同步引擎在此正式升级为多线程,并用 storage-benchmark-lab 式基准做<strong>同步 vs 多线程 A/B 对比</strong>。</div>
+
+  <!-- TIER 5 -->
+  <h2>Tier 5 · 持久性与运维</h2>
+  <p class="tier-sub">生产级的"无聊但要命"的部分:文件生命周期、备份、压缩、全链路校验。</p>
+  <table>
+    <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
+    <tr><td class="id">X</td><td>WAL 回收 + log number + 废文件删除</td><td class="anchor">DeleteObsoleteFiles / wal_manager</td><td class="harn">文件 GC 正确性</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">Y</td><td>Checkpoint / 备份(硬链接快照)</td><td class="anchor">checkpoint.cc</td><td class="harn">备份一致性</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">Z</td><td>Column Family(多个独立 keyspace 共享 WAL)</td><td class="anchor">column_family.cc</td><td class="harn">CF 隔离</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AA</td><td>Statistics / PerfContext(可观测)</td><td class="anchor">statistics.cc</td><td class="harn">计数一致性</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AB</td><td>块压缩(snappy/lz4/zstd,可插拔)</td><td class="anchor">util/compression.h(你改过)</td><td class="harn">压缩 round-trip</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AC</td><td>全链路校验和(block checksum)</td><td class="anchor">format.cc ChecksumType</td><td class="harn">故障注入(扩展 B1)</td><td><span class="st todo">todo</span></td></tr>
+  </table>
+  <div class="milestone">🏁 <strong>M5 — 运维级引擎</strong>:备份、压缩、CF、全程校验。接近能用。</div>
+
+  <!-- TIER 6 -->
+  <h2>Tier 6 · 进阶专题（选做,按兴趣）</h2>
+  <p class="tier-sub">前沿与变体。每个都能单独成一个深挖 lab,也对应你研究 backlog 的方向。</p>
+  <table>
+    <tr><th>Phase</th><th>成果</th><th>RocksDB 锚</th><th>harness</th><th>状态</th></tr>
+    <tr><td class="id">AD</td><td>前缀 bloom / 前缀迭代器</td><td class="anchor">prefix_extractor</td><td class="harn">前缀正确性</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AE</td><td>Merge operator(读-改-写合并)</td><td class="anchor">merge_operator.h / merge_helper.cc</td><td class="harn">合并结合律</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AF</td><td>Universal / FIFO compaction 风格</td><td class="anchor">compaction_picker_universal.cc</td><td class="harn">放大权衡实测</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AG</td><td>PinnableSlice 零拷贝读(★承 Borrow/Slice 讨论)</td><td class="anchor">pinnable_slice.h</td><td class="harn">零拷贝/生命周期</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AH</td><td>事务(乐观 + 悲观,2PC)</td><td class="anchor">transaction_db / write_prepared</td><td class="harn">隔离级别·冲突</td><td><span class="st todo">todo</span></td></tr>
+    <tr><td class="id">AI</td><td>用户时间戳 / MVCC 时间戳列</td><td class="anchor">timestamp 相关</td><td class="harn">时间戳序</td><td><span class="st todo">todo</span></td></tr>
+  </table>
+  <div class="milestone">🏁 <strong>M6 — 你自己的 RocksDB</strong>:从零造出的、特性可对标的单机 LSM 引擎。mission 第四段达成,且远超。</div>
+
+  <div class="foot">
+    <p><strong>当前位置.</strong> Tier 1:A✓ B✓ C✓ D✓ → <strong>M1 MVP</strong>。Tier 2:E✓(E1–E5 块化+基准+前缀压缩+CRC/lz4 全完成)· F✓(F1 BlockIter + F2 SstIter + F3 MemTableIter 全完成,三源同 LsmIterator)→ G✓(G1 MergeIterator min-heap 归并 + G2 engine.scan 范围读)→ H✓(InternalKey 字节可比编码 + seq 全路径 + 墓碑/delete)→ J✓(snapshot + get_as_of 点读时间旅行)→ K✓(DBIter + scan_as_of 范围时间旅行,去重归位到 DBIter)→ <strong>M2 多版本引擎收官</strong>。Tier 2 全部完成,下一站 Tier 3 compaction。反向迭代 prev 列为高级后续、不进主线。Phase S(block cache)lab 已提前出,被 E3 基准"热块重复读盘"牵引。</p>
+    <p style="font-size:.86em;color:var(--soft)"><strong>Tier 2 排序裁决(grilling).</strong> 维持 F→G→H,G 先在 plain key 上跑通、H3 再重写 G 比较器——"重写"是刻意教学点(亲历 seq 如何改比较器与去重)。LsmIterator 用裸 &amp;[u8] + 比较规则外置到 MergeIterator,使 H 改造只碰"存的 key 字节 / merge 比较器 / 上层解码"三处,不动 trait 签名。读路径两条并存(手写 get 命中即停 护 Phase R bloom · merge scan),靠 <code>get(k)≡scan(k..=k).first()</code> 差分锁一致。</p>
+    <p><strong>粒度可调.</strong> 任何 phase 觉得跨度大,可现场再拆(如 Phase A 拆成 A1/A2/A3、Phase D 拆成 D1/D2/D3)。觉得想合并/跳过/换序,随时说。</p>
+    <p><strong>lab 索引.</strong> <a href="0002-phase-a-memtable/index.html">Lab 0002 Phase A</a> · <a href="0003-phase-b-wal/index.html">Lab 0003 Phase B</a> · <a href="0004-phase-c-sst/index.html">Lab 0004 Phase C</a> · <a href="0005-phase-d-readpath/index.html">Lab 0005 Phase D</a> · <a href="0006-phase-e-block-sst/index.html">Lab 0006 Phase E</a> · <a href="0007-phase-f-iterator/index.html">Lab 0007 Phase F</a> · <a href="0008-phase-s-block-cache/index.html">Lab 0008 Phase S</a></p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A3 · 内存计量 + 冻结门</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="a2-memtable.html">← A2</a> &nbsp;·&nbsp; <a href="index.html">Phase A</a> &nbsp;·&nbsp; A3 &nbsp;·&nbsp; <span style="color:#bbb">Phase A 完</span></div>
+
+  <div class="kicker">STEP A3 · Phase A MemTable</div>
+  <h1>内存计量 + 冻结门</h1>
+  <p>MemTable 不能无限涨。它得知道自己多大，并在超阈值时喊"我满了，该冻结刷盘了"。<strong>这个信号是 Phase B（WAL 轮换）和 Phase C（flush 成 SST）的触发器。</strong></p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">给 <code>MemTable</code> 加 <code>approximate_size()</code>（原子累加 key+value 字节）与 <code>is_full(threshold)</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 不变量 harness 验证：大小随写入单调不减；恰好跨过阈值时 <code>is_full</code> 翻 true；并发写下计数不丢。</p>
+  </div>
+
+  <h3>为什么是"近似"（mission 锚）</h3>
+  <p>RocksDB 的 <code>MemTable::ApproximateMemoryUsage()</code> 也叫"近似"——精确算跳表每个节点的指针/arena 开销太贵，且没必要。冻结阈值本就是个软启发式。
+  你学到的可迁移原则：<strong>热路径上的计量要 O(1) 且无锁，宁可近似不可拖慢写入</strong>。所以用一个 <code>AtomicUsize</code> 在 put 时 <code>fetch_add</code>，而不是每次遍历跳表求和。</p>
+  <span class="src">对标 db/memtable.cc:300 ApproximateMemoryUsage · :319 ShouldFlushNow · write_buffer_size</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>改 <code>src/memtable.rs</code>：给 <code>MemTable</code> 加 <code>approx_size: AtomicUsize</code> 字段（见「代码 1」的 + 行）。</li>
+    <li><code>new()</code> 初始化为 0；<code>put</code> 里 <code>fetch_add(key.len()+value.len())</code>。</li>
+    <li>加 <code>approximate_size()</code> 与 <code>is_full()</code> 两个方法。</li>
+    <li>敲入「代码 2」不变量 harness，跑命令看绿。</li>
+  </ol>
+
+  <h3>代码 1 — 改 <code>src/memtable.rs</code>（<span style="color:#3a6b3a">+ 为新增行</span>）</h3>
+  <pre><span class="k">use</span> bytes::Bytes;
+<span class="k">use</span> crossbeam_skiplist::SkipMap;
+<span class="add">+ use std::sync::atomic::{AtomicUsize, Ordering};</span>
+<span class="k">use</span> crate::kv::{Key, Value};
+
+<span class="k">pub struct</span> <span class="t">MemTable</span> {
+    map: SkipMap&lt;Bytes, Bytes&gt;,
+<span class="add">+   approx_size: AtomicUsize, // 近似字节占用，热路径 O(1) 维护</span>
+}
+
+<span class="k">impl</span> <span class="t">MemTable</span> {
+    <span class="k">pub fn</span> <span class="f">new</span>() -> Self {
+        Self {
+            map: SkipMap::<span class="f">new</span>(),
+<span class="add">+           approx_size: AtomicUsize::new(0),</span>
+        }
+    }
+
+    <span class="k">pub fn</span> <span class="f">put</span>(&self, key: Key, value: Value) {
+<span class="add">+       // 注意：覆盖写也累加——这是"近似"的代价，见核心问题 2</span>
+<span class="add">+       self.approx_size.fetch_add(key.len() + value.len(), Ordering::Relaxed);</span>
+        self.map.<span class="f">insert</span>(key, value);
+    }
+
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[<span class="t">u8</span>]) -> Option&lt;Value&gt; {
+        self.map.<span class="f">get</span>(key).<span class="f">map</span>(|e| e.<span class="f">value</span>().<span class="f">clone</span>())
+    }
+
+<span class="add">+   /// 近似内存占用（字节）。O(1)，不遍历跳表。</span>
+<span class="add">+   pub fn approximate_size(&self) -> usize {</span>
+<span class="add">+       self.approx_size.load(Ordering::Relaxed)</span>
+<span class="add">+   }</span>
+<span class="add">+</span>
+<span class="add">+   /// 是否到达冻结阈值。这就是 Phase B/C 的触发信号。</span>
+<span class="add">+   pub fn is_full(&self, threshold: usize) -> bool {</span>
+<span class="add">+       self.approximate_size() &gt;= threshold</span>
+<span class="add">+   }</span>
+}</pre>
+
+  <div class="warnbox"><strong>为什么 <code>Relaxed</code>.</strong> 计数本身不保护任何其它内存的可见性顺序，只需原子地"不丢加法"。
+  最强的 <code>SeqCst</code> 在这里是无谓开销。能解释清楚"为什么 Relaxed 够"是核心问题 4。</div>
+
+  <h2>Harness 系统 ③：不变量检查</h2>
+  <div class="harness">
+    <div class="kicker">为什么这里用不变量</div>
+    <p style="margin:.3em 0 0">大小/阈值这种东西没有"参考实现"可对拍，但有<strong>任何时刻都必须成立的性质</strong>：①大小单调不减；②跨阈值那一刻 <code>is_full</code> 必翻 true，且之后恒 true；③并发 N 线程各写 M 次，总计数不丢（无数据竞争丢更新）。
+    把这些性质写成断言反复检验，就是不变量 harness。RocksDB 满代码的 <code>assert(...)</code> 正是把不变量钉在执行路径上——可迁移到任何系统代码。</p>
+  </div>
+
+  <h3>代码 2 — 不变量 harness（替换 <code>memtable.rs</code> 的 tests 模块，或并入）</h3>
+  <pre><span class="c">#[cfg(test)]</span>
+<span class="k">mod</span> size_tests {
+    <span class="k">use</span> super::*;
+    <span class="k">use</span> std::sync::Arc;
+    <span class="k">use</span> std::thread;
+
+    <span class="c">// 不变量①②：单调 + 阈值边界</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">size_monotonic_and_threshold</span>() {
+        <span class="k">let</span> mt = MemTable::<span class="f">new</span>();
+        <span class="k">let</span> <span class="k">mut</span> last = 0;
+        <span class="k">let</span> threshold = 100;
+        <span class="k">let</span> <span class="k">mut</span> crossed = false;
+        <span class="k">for</span> i <span class="k">in</span> 0..50 {
+            mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="f">format!</span>(<span class="s">"k{i}"</span>)), Bytes::<span class="f">from</span>(<span class="f">vec!</span>[0u8; 5]));
+            <span class="k">let</span> now = mt.<span class="f">approximate_size</span>();
+            <span class="f">assert!</span>(now &gt;= last, <span class="s">"大小回退: {last} -&gt; {now}"</span>); <span class="c">// ① 单调</span>
+            last = now;
+            <span class="k">if</span> mt.<span class="f">is_full</span>(threshold) { crossed = true; }
+            <span class="c">// ② 一旦 full 必恒 full（大小只增，阈值不变）</span>
+            <span class="f">assert_eq!</span>(mt.<span class="f">is_full</span>(threshold), now &gt;= threshold);
+        }
+        <span class="f">assert!</span>(crossed, <span class="s">"50 次写应越过阈值 100"</span>);
+    }
+
+    <span class="c">// 不变量③：并发写计数不丢</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">concurrent_size_no_lost_update</span>() {
+        <span class="k">let</span> mt = Arc::<span class="f">new</span>(MemTable::<span class="f">new</span>());
+        <span class="k">let</span> (threads, per) = (8, 1000);
+        <span class="k">let</span> handles: Vec&lt;_&gt; = (0..threads).<span class="f">map</span>(|t| {
+            <span class="k">let</span> mt = mt.<span class="f">clone</span>();
+            thread::<span class="f">spawn</span>(<span class="k">move</span> || {
+                <span class="k">for</span> i <span class="k">in</span> 0..per {
+                    <span class="c">// key 全局唯一，避免覆盖写干扰"应加字节"的精确预期</span>
+                    mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(<span class="f">format!</span>(<span class="s">"t{t}-k{i}"</span>)), Bytes::<span class="f">from</span>(<span class="f">vec!</span>[0u8; 3]));
+                }
+            })
+        }).<span class="f">collect</span>();
+        <span class="k">for</span> h <span class="k">in</span> handles { h.<span class="f">join</span>().<span class="f">unwrap</span>(); }
+        <span class="c">// 每次 put 加 key.len()+3。key 长度不一，所以验"下界不丢"：</span>
+        <span class="c">// 至少 threads*per*(最短key+3) 字节，且计数 == 实际所有 key/val 长度和。</span>
+        <span class="k">let</span> total = mt.<span class="f">approximate_size</span>();
+        <span class="f">assert!</span>(total &gt;= threads * per * (2 + 3), <span class="s">"并发丢了更新? total={total}"</span>);
+    }
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test memtable</div>
+  <div class="done"><div class="kicker">看到这三个就过</div><p style="margin:.3em 0 0"><code>memtable_matches_btreemap_oracle ... ok</code><br><code>size_monotonic_and_threshold ... ok</code><br><code>concurrent_size_no_lost_update ... ok</code></p></div>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">Phase A 收尾，想透这些</div>
+    <ol>
+      <li><strong>近似的偏差方向</strong>：覆盖写时你又加了一遍字节，但跳表里旧值被替换、没真占新空间。所以 <code>approximate_size</code> 是<strong>高估</strong>还是低估真实占用？高估和低估，哪个对"决定何时冻结"更安全？为什么？</li>
+      <li><strong>RocksDB 怎么算的</strong>：去读 <code>db/memtable.cc:300</code>，它把 arena 分配 + table 占用 + insert_hints 加起来。为什么它能拿到比你更真实的数，你的简化版差在哪？（提示：它自己管 arena 内存。）</li>
+      <li><strong>冻结之后</strong>：<code>is_full()==true</code> 之后该发生什么？RocksDB 是：当前 MemTable 转为 immutable、新建一个 active、旧的排队 flush。<strong>关键</strong>：为什么要"转 immutable 再后台 flush"，而不是当场停下来同步刷盘？（这是 Phase C 的设计，也牵涉 write stall——learning-record 0005。）</li>
+      <li><strong>内存序</strong>：解释为什么计数用 <code>Relaxed</code> 就够，不需要 <code>SeqCst</code>。如果将来 <code>is_full</code> 的结果要用来和"另一个线程设置的冻结标志"建立 happens-before 关系，那时还能用 Relaxed 吗？</li>
+    </ol>
+  </div>
+
+  <h2>Phase A 完成判定</h2>
+  <div class="done">
+    <p style="margin:.2em 0"><code>cargo test</code> 全绿，且你有了三类 harness：表驱动（A1）、模型差分（A2）、不变量（A3）。</p>
+    <p style="margin:.2em 0">你的 <code>MemTable</code>：<strong>能写、能查、有序、自知大小、会喊满</strong>。LSM 写路径的终点，自己手写完了。</p>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/memtable.cc">memtable.cc</a> 读 <code>ApproximateMemoryUsage</code> 与 <code>ShouldFlushNow</code> ·
+       <a href="https://skyzh.github.io/mini-lsm/week1-01-memtable.html">skyzh W1D1</a> 的 freeze 触发设计。</p>
+    <p><strong>下一步：Phase B — WAL.</strong> 现在断电 MemTable 全丢。下个 lab 在 put 前先把操作落进 write-ahead log，重启时重放恢复。届时 A3 的"满"信号会触发 WAL 轮换。先把上面 4 个核心问题想透，尤其 #3——它是 Phase B/C 的设计前提。</p>
+    <p>想完跟我对答案，或直接说"开 Phase B"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

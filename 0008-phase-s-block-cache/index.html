@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase S · block cache(LRU)— mini-LSM 自建引擎</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:32px;line-height:1.2;margin:.2em 0 .2em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:18px;color:#333}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:4px;font-size:.95em;margin:1em 0}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .win{color:var(--good);font-weight:bold}.lose{color:var(--accent);font-weight:bold}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0006-phase-e-block-sst/index.html">Phase E</a> &nbsp;·&nbsp; Phase S</div>
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0008(Tier 4 · 提前出)</div>
+  <h1>Phase S — block cache(LRU)</h1>
+  <p class="lede">Phase E 的基准反复点名同一个洞:<strong>热块被重复读盘、重复解压</strong>。E3 看到块化在热点查上输给"整文件常驻"的扁平实现;E5 加了 lz4 后,热点查更慢(每次 <code>get</code> 都解一整块)。Phase S 把这个洞补上——一个用户态 <strong>LRU block cache</strong>,缓存<strong>解析好的 <code>Block</code></strong>:命中则跳过 <code>pread</code> + 解压 + 解块,直接复用。压缩省的磁盘(E5)+ 缓存抹平的解压(S)= <strong>既小又快</strong>。对标 RocksDB <code>lru_cache.cc</code> / <code>block_based_table_reader</code> 的 block_cache。</p>
+
+  <div class="mission">
+    <strong>这是被基准牵引出来的 phase.</strong> 我们没有"按路线图顺序"提前做它,而是 E3/E5 的诚实数字<strong>逼着</strong>我们做:Q=100k 冷读里 block 搬了 410MB(&gt;文件本身)、热读因 lz4 涨到 2867ns——两处都写着"<strong>缺一个 cache</strong>"。这正是<strong>测量驱动优化</strong>的样子:先量化痛,再针对性补。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">新建 <code>block_cache.rs</code>:一个 <strong>O(1)</strong> 的 LRU(<code>HashMap</code> + 侵入式双向链表),key = <code>(file_id, offset)</code> 打包成 <code>u128</code>,value = <code>Arc&lt;Block&gt;</code>;带 <code>hits/misses</code> 计数。改 <code>SstReader</code>:加 <code>open_with_cache(path, file_id, cache)</code>,<code>read_block</code> 命中即复用 <code>Arc&lt;Block&gt;</code>、未命中才读盘装填。<strong>引擎 / 既有 <code>open</code> 路径不变(cache 可选)。</strong></p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> <code>hit_miss_counting</code> + <code>lru_evicts_least_recently_used</code>(触碰改变淘汰对象)绿;引擎 + Phase E 既有测试全过;跑 bench 的 Phase S 段:<strong>满驻 cache 命中率 &gt;95%、热读延迟掉到 flat 之下</strong>,受限 cache 命中率坍塌(诚实显示淘汰开销)。</p>
+  </div>
+
+  <h3>read_block:cache 命中跳过整条重活(数据流)</h3>
+  <svg viewBox="0 0 700 170" font-family="ui-monospace,monospace" font-size="11">
+    <rect x="10" y="20" width="120" height="32" fill="#fff" stroke="#2e5d7a"/><text x="70" y="40" text-anchor="middle" fill="#2e5d7a">get(key)</text>
+    <line x1="130" y1="36" x2="170" y2="36" stroke="#888" marker-end="url(#a)"/>
+    <rect x="172" y="20" width="150" height="32" fill="#fff" stroke="#2e5d7a"/><text x="247" y="40" text-anchor="middle" fill="#2e5d7a">稀疏索引二分 → handle</text>
+    <line x1="322" y1="36" x2="362" y2="36" stroke="#888" marker-end="url(#a)"/>
+    <rect x="364" y="20" width="150" height="32" fill="#fff7d6" stroke="#7a9a5a"/><text x="439" y="40" text-anchor="middle" fill="#3a5a2a">cache.get((id,off))?</text>
+
+    <line x1="439" y1="52" x2="439" y2="78" stroke="#3a6b3a" marker-end="url(#a)"/><text x="455" y="70" fill="#3a6b3a">命中</text>
+    <rect x="364" y="80" width="200" height="30" fill="#e8f0e0" stroke="#3a6b3a"/><text x="464" y="100" text-anchor="middle" fill="#3a5a2a">复用 Arc&lt;Block&gt; · 0 IO 0 解压</text>
+
+    <line x1="514" y1="36" x2="560" y2="36" stroke="#c98a6a" marker-end="url(#a)"/><text x="540" y="28" fill="#c98a6a">未命中</text>
+    <rect x="562" y="20" width="128" height="32" fill="#fcf3ee" stroke="#c98a6a"/><text x="626" y="34" text-anchor="middle" fill="#7a3b2e" font-size="9">pread+unseal+decode</text><text x="626" y="46" text-anchor="middle" fill="#7a3b2e" font-size="9">→ put → 返回</text>
+    <text x="10" y="140" fill="#888">命中路径只剩"块内二分":逼近 flat 的纯内存偏移。未命中才付完整的 IO + CRC + 解压。</text>
+    <text x="10" y="158" fill="#3a6b3a">value 仍 Bytes::copy_from_slice 拷出(点查边界);Phase F 的迭代器持 Arc&lt;Block&gt; 才真零拷贝。</text>
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#888"/></marker></defs>
+  </svg>
+  <p><strong>为什么缓存"解析好的 Block"而不是"原始字节"?</strong> OS page cache 已经替我们缓存了<strong>磁盘字节</strong>(热块第二次 <code>pread</code> 往往不真打盘)。我们要省的是字节<strong>之上</strong>的工:<strong>lz4 解压 + 解 restarts/offsets 数组</strong>——这部分 OS 帮不了,只能在<strong>用户态</strong>缓存解码产物。这就是 RocksDB block_cache 与 OS page cache 的<strong>分工</strong>:前者缓存"可直接查的 <code>Block</code> 对象",后者缓存"裸文件页"。E5 加了压缩后,这层用户态缓存的价值<strong>陡增</strong>(解压很贵)。</p>
+  <span class="src">cache/lru_cache.cc(LRUCacheShard:侵入链表 + 引用计数)· table/block_based/block_based_table_reader.cc(MaybeReadBlockAndLoadToCache · key = cache_key_prefix + offset)</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>src/block_cache.rs</code>(「代码 1」):<code>cache_key(file_id,offset)-&gt;u128</code>;<code>Inner</code> 持 <code>HashMap&lt;u128,Entry&gt;</code> + <code>head/tail</code>;<code>unlink/push_front</code> 维护链表;<code>BlockCache::get/put</code> + 原子 <code>hits/misses</code>。<code>lib.rs</code> 加 <code>pub mod block_cache;</code>。</li>
+    <li>改 <code>SstReader</code>(「代码 2」):加 <code>file_id</code> + <code>cache: Option&lt;Arc&lt;BlockCache&gt;&gt;</code> 字段、<code>open_with_cache</code>;<code>read_block</code> 返回 <code>Arc&lt;Block&gt;</code> 并先查 cache;抽出 <code>read_block_uncached</code> 做真读盘。</li>
+    <li>敲入「代码 3」harness(命中/淘汰),<code>cargo test</code> 全绿。</li>
+    <li><code>cargo run --release --bin bench</code>,看 Phase S 段:满驻 vs 受限 vs 无 cache。</li>
+  </ol>
+
+  <h3>代码 1 — <code>block_cache.rs</code>(O(1) LRU)</h3>
+  <pre><span class="c">// key = (file_id, offset) 打包成 Copy 的 u128;value = Arc&lt;Block&gt;。</span>
+<span class="k">pub fn</span> <span class="f">cache_key</span>(file_id: u64, offset: u64) -> u128 {
+    ((file_id <span class="k">as</span> u128) &lt;&lt; 64) | (offset <span class="k">as</span> u128)
+}
+
+<span class="k">struct</span> <span class="t">Entry</span> { block: Arc&lt;Block&gt;, prev: Option&lt;u128&gt;, next: Option&lt;u128&gt; }
+<span class="k">struct</span> <span class="t">Inner</span> { map: HashMap&lt;u128, Entry&gt;, head: Option&lt;u128&gt;, tail: Option&lt;u128&gt;, cap: usize }
+
+<span class="k">impl</span> <span class="t">Inner</span> {
+    <span class="k">fn</span> <span class="f">unlink</span>(&<span class="k">mut</span> self, k: u128) {           <span class="c">// 把 k 从链表摘下</span>
+        <span class="k">let</span> (prev, next) = { <span class="k">let</span> e = &self.map[&k]; (e.prev, e.next) };
+        <span class="k">match</span> prev { Some(p) => self.map.<span class="f">get_mut</span>(&p).<span class="f">unwrap</span>().next = next, None => self.head = next }
+        <span class="k">match</span> next { Some(n) => self.map.<span class="f">get_mut</span>(&n).<span class="f">unwrap</span>().prev = prev, None => self.tail = prev }
+    }
+    <span class="k">fn</span> <span class="f">push_front</span>(&<span class="k">mut</span> self, k: u128) {       <span class="c">// 接到链表头(最近用)</span>
+        <span class="k">let</span> old = self.head;
+        <span class="k">if let</span> Some(h) = old { self.map.<span class="f">get_mut</span>(&h).<span class="f">unwrap</span>().prev = Some(k); }
+        { <span class="k">let</span> e = self.map.<span class="f">get_mut</span>(&k).<span class="f">unwrap</span>(); e.prev = None; e.next = old; }
+        self.head = Some(k);
+        <span class="k">if</span> self.tail.<span class="f">is_none</span>() { self.tail = Some(k); }
+    }
+}
+
+<span class="k">pub struct</span> <span class="t">BlockCache</span> { inner: Mutex&lt;Inner&gt;, hits: AtomicU64, misses: AtomicU64 }
+
+<span class="k">impl</span> <span class="t">BlockCache</span> {
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, k: u128) -> Option&lt;Arc&lt;Block&gt;&gt; {
+        <span class="k">let</span> <span class="k">mut</span> g = self.inner.<span class="f">lock</span>().<span class="f">unwrap</span>();
+        <span class="k">if</span> !g.map.<span class="f">contains_key</span>(&k) { self.misses.<span class="f">fetch_add</span>(1, Relaxed); <span class="k">return</span> None; }
+        g.<span class="f">unlink</span>(k); g.<span class="f">push_front</span>(k);          <span class="c">// 命中 → 提到最近用</span>
+        self.hits.<span class="f">fetch_add</span>(1, Relaxed);
+        Some(g.map[&k].block.<span class="f">clone</span>())            <span class="c">// Arc 克隆,廉价</span>
+    }
+    <span class="k">pub fn</span> <span class="f">put</span>(&self, k: u128, block: Arc&lt;Block&gt;) {
+        <span class="k">let</span> <span class="k">mut</span> g = self.inner.<span class="f">lock</span>().<span class="f">unwrap</span>();
+        <span class="k">if</span> g.map.<span class="f">contains_key</span>(&k) { <span class="c">/* 刷新位置 + 替换 */</span> <span class="k">return</span>; }
+        g.map.<span class="f">insert</span>(k, Entry { block, prev: None, next: None });
+        g.<span class="f">push_front</span>(k);
+        <span class="k">if</span> g.map.<span class="f">len</span>() &gt; g.cap {                  <span class="c">// 超容量 → 淘汰 tail(最久未用)</span>
+            <span class="k">if let</span> Some(victim) = g.tail { g.<span class="f">unlink</span>(victim); g.map.<span class="f">remove</span>(&victim); }
+        }
+    }
+}</pre>
+  <div class="warnbox"><strong>侵入式链表:key 当指针。</strong> Rust 里把节点用 <code>Box</code>/裸指针串成链表会跟借用检查器硬碰硬。技巧:<strong>不存指针,存 key</strong>——<code>prev/next: Option&lt;u128&gt;</code>,要"跟着指针走"就拿 key 回 <code>HashMap</code> 查。<code>unlink</code>/<code>push_front</code> 全程只改 <code>HashMap</code> 里的字段,无裸指针、无 <code>unsafe</code>,却保住 O(1)。这是 Rust 写链式结构的常用绕法(slotmap/index-as-pointer 同源)。代价:每次"跟指针"多一次哈希查找——可接受。</div>
+
+  <h3>代码 2 — <code>SstReader</code> 接入 cache</h3>
+  <pre><span class="k">pub struct</span> <span class="t">SstReader</span> {
+    <span class="c">// …file, index, blocks_read, bytes_read…</span>
+    file_id: u64,                     <span class="c">// cache key 前半段</span>
+    cache: Option&lt;Arc&lt;BlockCache&gt;&gt;,   <span class="c">// None = 直读(引擎/既有路径)</span>
+}
+<span class="k">impl</span> <span class="t">SstReader</span> {
+    <span class="k">pub fn</span> <span class="f">open</span>(path: &Path) -> Result&lt;Self&gt; { Self::<span class="f">open_inner</span>(path, <span class="k">false</span>, 0, None) }
+    <span class="k">pub fn</span> <span class="f">open_with_cache</span>(path: &Path, file_id: u64, cache: Arc&lt;BlockCache&gt;) -> Result&lt;Self&gt; {
+        Self::<span class="f">open_inner</span>(path, <span class="k">false</span>, file_id, Some(cache))
+    }
+
+    <span class="k">fn</span> <span class="f">read_block</span>(&self, h: BlockHandle) -> Result&lt;Arc&lt;Block&gt;&gt; {
+        <span class="k">if let</span> Some(cache) = &self.cache {
+            <span class="k">let</span> key = <span class="f">cache_key</span>(self.file_id, h.offset);
+            <span class="k">if let</span> Some(b) = cache.<span class="f">get</span>(key) { <span class="k">return</span> Ok(b); }  <span class="c">// 命中:0 IO 0 解压</span>
+            <span class="k">let</span> block = Arc::<span class="f">new</span>(self.<span class="f">read_block_uncached</span>(h)?);
+            cache.<span class="f">put</span>(key, block.<span class="f">clone</span>());
+            <span class="k">return</span> Ok(block);
+        }
+        Ok(Arc::<span class="f">new</span>(self.<span class="f">read_block_uncached</span>(h)?))
+    }
+    <span class="k">fn</span> <span class="f">read_block_uncached</span>(&self, h: BlockHandle) -> Result&lt;Block&gt; {
+        <span class="c">// 原 read_block:pread → blocks_read/bytes_read++ → unseal(crc+解压) → decode</span>
+    }
+}</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>blocks_read</code>/<code>bytes_read</code> 只在 <code>read_block_uncached</code>(真读盘)里自增。所以<strong>命中不计入读放大</strong>——cache 生效时这俩计数器停止增长,正是它有效的铁证。</p>
+
+  <h2>实测:cache 让块化在热点查上反超 flat</h2>
+  <p>同一组 10 万次热点 readrandom,先 warmup 一遍再计时:</p>
+  <table>
+    <thead><tr><th>配置</th><th>热读延迟</th><th>命中率</th><th>读这一行</th></tr></thead>
+    <tbody>
+      <tr><td>flat(整文件常驻,参照)</td><td>~1260 ns/op</td><td>—</td><td>纯内存二分 + 偏移,无 IO 无解压</td></tr>
+      <tr><td>block 无 cache</td><td class="lose">~2639 ns/op</td><td>—</td><td>每次 pread + lz4 解压 + 解块</td></tr>
+      <tr><td><strong>block + cache 满驻</strong></td><td class="win">~975 ns/op</td><td>97.3%</td><td><strong>反超 flat</strong>:热块只解一次,后续只剩"块内二分"</td></tr>
+      <tr><td>block + cache 受限(64 块)</td><td class="lose">~2854 ns/op</td><td>0.2%</td><td>27778 块里只缓 64 个 → 几乎全 miss + 淘汰开销</td></tr>
+    </tbody>
+  </table>
+  <p><strong>这是整条 Phase E 弧线的收束。</strong>把三个数字连起来看:</p>
+  <ul>
+    <li><strong>E3</strong>:block 热读 ~1440ns,输给 flat 的 ~1190ns(块化的"按需解块"代价)。</li>
+    <li><strong>E5</strong>:加 lz4,block 热读涨到 ~2639ns(解压更贵),但磁盘 −63%。</li>
+    <li><strong>S</strong>:满驻 cache,block 热读掉到 <strong>~975ns,反超 flat</strong>——而磁盘 −63% 的赢面<strong>一分没还</strong>。</li>
+  </ul>
+  <p>压缩(省空间、费 CPU)与缓存(费内存、省 CPU)是<strong>天生一对</strong>:cache 把压缩的 CPU 代价<strong>摊成一次性</strong>(每块只解一次),压缩的磁盘/内存收益却<strong>持续</strong>。而<strong>受限 cache</strong> 那一行同样重要——它诚实地说:cache 不是魔法,<strong>工作集装不下时命中率坍塌</strong>(0.2%),还白搭淘汰开销。cache 大小该按热数据工作集定,不是越大越好(那就是 Phase T 的 table cache、以及容量 vs 命中率的调优课)。</p>
+
+  <h2>🧰 Coding style:Arc 共享只读 · index-as-pointer · 可选依赖注入</h2>
+  <ul>
+    <li><strong><code>Arc&lt;Block&gt;</code> 共享只读</strong>:cache 和调用方<strong>同时持有</strong>同一个解码块,靠 <code>Arc</code> 引用计数共享、克隆廉价(只加计数)。"<strong>不可变 + 引用计数 = 安全共享只读</strong>"是 Rust 缓存/快照类结构的主力范式(承 H 阶段 MVCC 的同一招)。</li>
+    <li><strong>index-as-pointer 写链表</strong>:用 key 当链接、回哈希表解引用,绕开"Rust 裸指针链表"的借用地狱,还保 O(1)。当你需要"侵入式数据结构 + 借用检查器友好",这是标准答案。</li>
+    <li><strong>可选依赖注入(<code>Option&lt;Arc&lt;Cache&gt;&gt;</code>)</strong>:cache 作为<strong>可选</strong>能力注入 reader,<code>None</code> 时行为与从前一字不差。新功能<strong>不破坏旧路径</strong>、按需开启——引擎、既有测试全程无感。这是给深模块"加 cache 一类横切能力"的干净接法。</li>
+  </ul>
+
+  <h2>🧠 System mindset:缓存层次 · 局部性 · 容量/命中率 · 压缩×缓存对偶</h2>
+  <table>
+    <thead><tr><th>概念</th><th>本阶段怎么体现 / 跨域同构</th></tr></thead>
+    <tbody>
+      <tr><td><strong>缓存层次分工</strong></td><td>用户态 block_cache(缓存<strong>解码产物</strong>)叠在 OS page cache(缓存<strong>裸字节</strong>)之上,各缓各的、互不替代。同构:CPU L1/L2/L3、CDN edge/origin、DB buffer pool + OS cache、浏览器 memory/disk cache。<strong>每层缓存离"用"越近,缓的东西越"熟"(越接近可直接消费的形态)</strong>。</td></tr>
+      <tr><td><strong>局部性是命中率的前提</strong></td><td>满驻 97.3% vs 受限 0.2%,差距全在"工作集装不装得下"。LRU 赌的是<strong>时间局部性</strong>(刚用的还会用)。无局部性的负载(纯随机扫一遍)cache 必然失效——这时该上 bloom(跳过)或干脆别缓。</td></tr>
+      <tr><td><strong>容量 vs 命中率</strong></td><td>cache 越大命中率越高,但内存有限、且大 cache 自身有管理开销。这条曲线(命中率 vs 容量)是所有缓存系统的<strong>核心调优面</strong>——Phase T 的 table cache、Redis maxmemory、CDN 容量规划都在这条曲线上找点。</td></tr>
+      <tr><td><strong>压缩 × 缓存对偶</strong></td><td>压缩省空间/费 CPU,缓存费内存/省 CPU——两者在 CPU 维度<strong>互补</strong>:cache 命中后压缩的解压成本归零,只剩压缩的空间收益。<strong>"压了就缓、缓了敢压"</strong>是存储引擎的标准组合拳。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:cache 不是"加上就快"。它的收益 = <strong>命中率 × 单次省下的工</strong>。Phase E 把"单次省下的工"做大了(lz4 解压很贵),于是同样命中率下 cache 的<strong>边际价值飙升</strong>。设计任何缓存前,先量这两个量;受限 cache 那一行提醒你:<strong>命中率上不去时,再贵的单次节省也乘出 0</strong>。</p>
+
+  <h2>🧪 Harness 系统:LRU 淘汰序 + 命中率断言</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">LRU 最容易错在<strong>淘汰顺序</strong>:链表指针接反、<code>get</code> 忘了把命中项提到头、淘汰挑错端。功能差分测不出来(返回值都对),得专门构造<strong>淘汰序断言</strong>:<code>cap=2</code>,放 k1、k2,<strong>触碰 k1</strong>,再放 k3 —— 正确的 LRU 必须淘汰 <strong>k2</strong>(最久未用),而非 k1。这条用例同时验证了"<code>get</code> 会刷新最近用"和"淘汰挑 tail"两件事。其次是<strong>命中率作为可断言指标</strong>:bench 里满驻 cache 命中率必须 &gt;95%、受限必须坍塌——把"cache 有没有生效"从感觉变成<strong>数字门槛</strong>。这类"<strong>断言一个统计量落在预期区间</strong>"的 harness(命中率、p99、压缩率、QPS),是性能组件区别于功能组件的测试方式:功能测<strong>对不对</strong>,性能组件还要测<strong>有没有起到作用</strong>。</p>
+  </div>
+
+  <h3>代码 3 — harness(<code>block_cache.rs</code> tests)</h3>
+  <pre>    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">hit_miss_counting</span>() {
+        <span class="k">let</span> c = BlockCache::<span class="f">new</span>(2);
+        <span class="k">let</span> k1 = <span class="f">cache_key</span>(0, 0);
+        <span class="f">assert!</span>(c.<span class="f">get</span>(k1).<span class="f">is_none</span>());        <span class="c">// miss</span>
+        c.<span class="f">put</span>(k1, <span class="f">one_block</span>(b<span class="s">"a"</span>, b<span class="s">"1"</span>));
+        <span class="f">assert!</span>(c.<span class="f">get</span>(k1).<span class="f">is_some</span>());        <span class="c">// hit</span>
+        <span class="f">assert_eq!</span>(c.<span class="f">hits</span>(), 1); <span class="f">assert_eq!</span>(c.<span class="f">misses</span>(), 1);
+    }
+
+    <span class="c">// 淘汰序:cap=2,触碰 k1 后插 k3 → 必须淘汰 k2(最久未用),不是 k1。</span>
+    <span class="c">#[test]</span> <span class="k">fn</span> <span class="f">lru_evicts_least_recently_used</span>() {
+        <span class="k">let</span> c = BlockCache::<span class="f">new</span>(2);
+        <span class="k">let</span> (k1, k2, k3) = (<span class="f">cache_key</span>(0,0), <span class="f">cache_key</span>(0,1), <span class="f">cache_key</span>(0,2));
+        c.<span class="f">put</span>(k1, ..); c.<span class="f">put</span>(k2, ..);
+        <span class="f">assert!</span>(c.<span class="f">get</span>(k1).<span class="f">is_some</span>());        <span class="c">// 触碰 k1 → k2 变最久未用</span>
+        c.<span class="f">put</span>(k3, ..);                       <span class="c">// 淘汰 k2</span>
+        <span class="f">assert!</span>(c.<span class="f">get</span>(k2).<span class="f">is_none</span>(), <span class="s">"k2 应被淘汰"</span>);
+        <span class="f">assert!</span>(c.<span class="f">get</span>(k1).<span class="f">is_some</span>() && c.<span class="f">get</span>(k3).<span class="f">is_some</span>());
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test && cargo run --release --bin bench</div>
+  <div class="done"><div class="kicker">Phase S 判定 — 全绿</div><p style="margin:.3em 0 0"><code>block_cache::tests::hit_miss_counting ... ok</code><br><code>block_cache::tests::lru_evicts_least_recently_used ... ok</code><br>+ <code>sst::tests::*</code> / <code>engine::tests::*</code> 全部回归(cache 可选,旧路径不变)<br><strong>22 passed; 0 failed</strong> · bench 满驻 cache <strong>975 ns/op(命中率 97.3%,反超 flat)</strong></p></div>
+
+  <h2>🔄 CI/CD:命中率回归门(雏形)</h2>
+  <p>Phase S 给"性能门"递上第一个<strong>稳定可断言的指标</strong>:cache 命中率。在 Phase R 接 <code>storage-benchmark-lab</code> 正式设性能回归门时,"满驻 cache 命中率 &gt; 95%"就是一条好守的线——它不像绝对延迟那样受机器抖动影响,是<strong>结构性</strong>指标(命中率掉了一定是 cache 逻辑或工作集变了)。这类"<strong>断结构性比率、而非绝对时延</strong>"的门,在 CI 里最稳、最少误报。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">Phase S 想透这几个</div>
+    <ol>
+      <li><strong>缓存解码块 vs 缓存裸字节,差在哪?</strong> OS page cache 已经缓了文件页,我们为什么还要自建 cache?(提示:OS 缓的是<strong>压缩态裸字节</strong>,每次 <code>get</code> 仍要 lz4 解压 + 解 restarts 数组。我们缓<strong>解码后的 <code>Block</code></strong>,把这部分用户态的工也省掉。E5 加压缩后两者价值差距拉满。)</li>
+      <li><strong>cap 该按什么定?</strong> 满驻 97% vs 受限 0.2%。生产里 cache 该开多大?(提示:按<strong>热数据工作集</strong>,不是按总数据。受限那行说明:小于工作集就坍塌。但也不能无限大——内存有限、且要给 memtable/索引留地方。这是 Phase T、以及"内存预算分配"的调优题。)</li>
+      <li><strong>单锁会成瓶颈吗?</strong> 我们的 <code>Mutex&lt;Inner&gt;</code> 全局一把锁。多线程高并发读时会怎样?(提示:所有 <code>get</code> 抢同一把锁 → 串行化。RocksDB 的 <code>LRUCache</code> <strong>分片</strong>(按 key 哈希分到 N 个独立 shard,各自一把锁)把锁竞争降到 1/N。这是你"并发 backlog"在缓存层的一道题:<strong>分片是降低锁竞争的通用招</strong>。)</li>
+      <li><strong>cache 会不会让 <code>blocks_read</code> 说谎?</strong> 命中时我们<strong>不</strong>增 <code>blocks_read</code>。那 E2 的"一次点查最多读一块"不变量在带 cache 时还成立吗?(提示:那条不变量测的是<strong>无 cache</strong> 的 <code>open</code> 路径,语义是"读盘放大";带 cache 后"读盘"次数只会<strong>更少</strong>。两个计数器各测一件事:<code>blocks_read</code>=真读盘,<code>cache.hits</code>=免读盘。别让一个指标背两个含义。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>承上.</strong> 这一步直接回收了 <a href="../0006-phase-e-block-sst/e3-bench.html">E3</a> 与 <a href="../0006-phase-e-block-sst/e5-block-trailer.html">E5</a> 反复点名的两笔账:热块重复读盘、重复解压。块化 SST 至此"既小又快"的故事才真正闭合。</p>
+    <p><strong>启下.</strong> <strong>Phase T — table cache</strong>(复用打开的文件句柄,省 <code>open</code> + 索引载入)是同一思路的下一层缓存;<strong>Phase R — bloom filter</strong> 则从另一端发力:让<strong>不存在的 key 连块都不读</strong>(cache 救热块,bloom 救 miss)。两者 + 本 cache 合起来,就是 RocksDB 读路径"<strong>少读盘</strong>"的三板斧。性能回归门(接 storage-benchmark-lab)在 R 正式落地,本课的命中率指标是它的第一块拼图。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/cache/lru_cache.cc">lru_cache.cc</a>(<code>LRUCacheShard</code>:侵入链表 + 分片 + 引用计数)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_based_table_reader.cc">block_based_table_reader.cc</a>(<code>MaybeReadBlockAndLoadToCache</code>)。</p>
+    <p>想完跟我对答案,或说"继续 Phase R / Phase T"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

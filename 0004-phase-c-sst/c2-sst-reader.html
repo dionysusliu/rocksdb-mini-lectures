@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C2 · SstReader 二分点查</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="c1-sst-builder.html">← C1</a> &nbsp;·&nbsp; <a href="index.html">Phase C</a> &nbsp;·&nbsp; C2 &nbsp;·&nbsp; <a href="c3-flush.html">C3 flush →</a></div>
+
+  <div class="kicker">STEP C2 · Phase C SST</div>
+  <h1>SstReader — 二分点查</h1>
+  <p>把 C1 写出的字节读回来。关键收获:<strong>不必把整个文件载入逻辑结构</strong>——读个固定 footer 定位 index,二分索引,只去 data 区捞那一条 value。这是 SST 比"重放 WAL"快的根源。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>SstReader</code>:<code>open(path)</code>(读 footer + 载入 index)+ <code>get(key)</code>(二分 + 读 entry)。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 差分 harness——随机有序输入,<code>SstReader::get</code> 与 <code>BTreeMap::get</code> 逐键一致;边界键(小于全部 / 大于全部 / 不存在)返回 <code>None</code>。</p>
+  </div>
+
+  <h3>读路径三步(对标 RocksDB)</h3>
+  <p>① 从文件尾读 24B footer → 拿到 <code>index_offset/index_len/magic</code>;② 校验 magic、解析 index 进内存;③ <code>get</code> 对 index 二分,命中则按偏移去 data 区读那条 entry 的 value。</p>
+  <span class="src">对标 table/block_based/block_based_table_reader.cc(Open 读 footer → 读 index block → Get 二分)</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>给 <code>src/sst.rs</code> 补「代码 1」<code>SstReader</code>(<code>open</code> + <code>get</code>)。注意顶部 <code>use</code> 补 <code>std::io::Read</code>。</li>
+    <li>把「代码 2」的两个测试加进 <code>sst.rs</code> 的 <code>tests</code> 模块(和 C1 的 <code>rejects_unsorted</code> 并列)。</li>
+    <li>跑命令看绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>sst.rs</code> 的 <code>SstReader</code></h3>
+  <pre><span class="c">// 顶部 use 区补:</span>
+<span class="k">use</span> std::io::Read;
+
+<span class="c">/// 只读打开一个 SST,支持点查。MVP:整文件入内存(RocksDB 按 block 读 + cache)。</span>
+<span class="k">pub struct</span> <span class="t">SstReader</span> {
+    raw: Vec&lt;<span class="t">u8</span>&gt;,
+    index: Vec&lt;(Bytes, <span class="t">u64</span>)&gt;, <span class="c">// 已排序的 (key, data偏移)</span>
+}
+<span class="k">impl</span> <span class="t">SstReader</span> {
+    <span class="k">pub fn</span> <span class="f">open</span>(path: &Path) -> Result&lt;Self&gt; {
+        <span class="k">let</span> <span class="k">mut</span> raw = Vec::<span class="f">new</span>();
+        File::<span class="f">open</span>(path)?.<span class="f">read_to_end</span>(&<span class="k">mut</span> raw)?;
+        <span class="k">if</span> raw.<span class="f">len</span>() &lt; FOOTER_LEN { <span class="f">bail!</span>(<span class="s">"SST 太小,无 footer"</span>); }
+        <span class="c">// ① 从尾部读 footer</span>
+        <span class="k">let</span> ft = &raw[raw.<span class="f">len</span>() - FOOTER_LEN..];
+        <span class="k">let</span> index_offset = <span class="t">u64</span>::<span class="f">from_le_bytes</span>(ft[0..8].<span class="f">try_into</span>()?) <span class="k">as</span> <span class="t">usize</span>;
+        <span class="k">let</span> index_len = <span class="t">u64</span>::<span class="f">from_le_bytes</span>(ft[8..16].<span class="f">try_into</span>()?) <span class="k">as</span> <span class="t">usize</span>;
+        <span class="k">let</span> magic = <span class="t">u64</span>::<span class="f">from_le_bytes</span>(ft[16..24].<span class="f">try_into</span>()?);
+        <span class="k">if</span> magic != MAGIC { <span class="f">bail!</span>(<span class="s">"magic 不符,非本格式 SST"</span>); } <span class="c">// ② 校验格式</span>
+        <span class="c">// ③ 解析 index 进内存</span>
+        <span class="k">let</span> idx = &raw[index_offset..index_offset + index_len];
+        <span class="k">let</span> count = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(idx[0..4].<span class="f">try_into</span>()?) <span class="k">as</span> <span class="t">usize</span>;
+        <span class="k">let</span> <span class="k">mut</span> index = Vec::<span class="f">with_capacity</span>(count);
+        <span class="k">let</span> <span class="k">mut</span> i = 4;
+        <span class="k">for</span> _ <span class="k">in</span> 0..count {
+            <span class="k">let</span> kl = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(idx[i..i+4].<span class="f">try_into</span>()?) <span class="k">as</span> <span class="t">usize</span>; i += 4;
+            <span class="k">let</span> key = Bytes::<span class="f">copy_from_slice</span>(&idx[i..i+kl]); i += kl;
+            <span class="k">let</span> off = <span class="t">u64</span>::<span class="f">from_le_bytes</span>(idx[i..i+8].<span class="f">try_into</span>()?); i += 8;
+            index.<span class="f">push</span>((key, off));
+        }
+        Ok(Self { raw, index })
+    }
+
+    <span class="c">/// 点查:对 index 二分,命中则读 data 区那条 entry 的 value。O(log n)。</span>
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[<span class="t">u8</span>]) -> Option&lt;Bytes&gt; {
+        <span class="k">let</span> pos = self.index.<span class="f">binary_search_by</span>(|(k, _)| k.<span class="f">as_ref</span>().<span class="f">cmp</span>(key)).<span class="f">ok</span>()?;
+        <span class="k">let</span> off = self.index[pos].1 <span class="k">as</span> <span class="t">usize</span>;
+        <span class="k">let</span> d = &self.raw;
+        <span class="k">let</span> kl = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(d[off..off+4].<span class="f">try_into</span>().<span class="f">ok</span>()?) <span class="k">as</span> <span class="t">usize</span>;
+        <span class="k">let</span> vstart = off + 4 + kl;
+        <span class="k">let</span> vl = <span class="t">u32</span>::<span class="f">from_le_bytes</span>(d[vstart..vstart+4].<span class="f">try_into</span>().<span class="f">ok</span>()?) <span class="k">as</span> <span class="t">usize</span>;
+        Some(Bytes::<span class="f">copy_from_slice</span>(&d[vstart+4..vstart+4+vl]))
+    }
+
+    <span class="k">pub fn</span> <span class="f">len</span>(&self) -> <span class="t">usize</span> { self.index.<span class="f">len</span>() }
+    <span class="k">pub fn</span> <span class="f">is_empty</span>(&self) -> <span class="t">bool</span> { self.index.<span class="f">is_empty</span>() }
+}</pre>
+
+  <h2>🧰 Coding style：零拷贝解析 + Option 组合子 + ? 传播</h2>
+  <ul>
+    <li><strong>零拷贝解析</strong>:<code>open</code> 把整文件读进一个 <code>raw: Vec&lt;u8&gt;</code>,之后 index/footer 全是<strong>对 <code>raw</code> 的 slice</strong>(<code>&amp;raw[a..b]</code>),不复制。只有 <code>get</code> 要把 value <strong>交出函数边界</strong>时才 <code>Bytes::copy_from_slice</code>。这正是前面 Borrow/Slice 讨论的落地:<strong>解析期借用、边界处才拷贝</strong>。任意 parser(网络协议、文件格式)通用。</li>
+    <li><strong><code>Option</code> 组合子 + <code>?</code></strong>:<code>get</code> 用 <code>binary_search_by(...).ok()?</code> 把"没找到"短路成 <code>None</code>;<code>open</code> 用 <code>?</code> 把每一步 <code>try_into</code> 失败向上抛。错误/缺失沿<strong>一条直路</strong>传播,不靠嵌套 if——FP 的 Result/Either monad 思想,迁移到任何有 sum type 的语言。</li>
+    <li><strong>解析失败 vs 逻辑缺失</strong>:注意区分——<code>open</code> 的 <code>?</code> 是"文件坏了"(Err),<code>get</code> 的 <code>?</code> 是"key 不在"(None)。两种"没有"用两种类型表达,语义不混。</li>
+  </ul>
+
+  <h2>🧠 System mindset：index/data 分离 · 二分 · 内存层级局部性</h2>
+  <p>SstReader 体现一条贯穿所有存储/计算系统的原理:<strong>把"找在哪"(index)和"是什么"(data)分开,让查找只碰小而热的 index</strong>。</p>
+  <table>
+    <thead><tr><th>原理</th><th>本课</th><th>同一原理在别处</th></tr></thead>
+    <tbody>
+      <tr><td>index/data 分离</td><td>index 入内存,data 留盘按需读</td><td>B-tree 内节点 vs 叶 · DB 二级索引 · 倒排索引</td></tr>
+      <tr><td>有序 → 二分 O(log n)</td><td><code>binary_search_by</code></td><td>任何有序数组/外存查找 · <code>std::lower_bound</code></td></tr>
+      <tr><td>内存层级局部性</td><td>小 index 热、大 data 冷</td><td>CPU cache line · page cache · TLB · CDN 边缘 · GPU shared memory(HPC)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:RocksDB 比我们多一级——<strong>两级索引</strong>(块索引定位 4KB 块 → 块内再找)。看似多一步,却在大文件上赢,因为<strong>第一级小到能整个进 cache</strong>,第二级只读一个块。这就是"<strong>分层让热数据更热</strong>"的通用直觉:CPU 的 L1/L2/L3、网络的 cache 层级、HPC 的 register/shared/global memory,全是同一招——<strong>用一个小而快的层挡住对大而慢的层的访问</strong>。你设计任何"查找密集"系统时,先问:热的那一小块能不能单独拎出来放进更快的层?</p>
+
+  <h2>Harness 系统：格式 round-trip + 差分</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">现在 builder + reader 都在了,可以闭环:<strong>build → open → 逐键读回</strong>。
+    用 <code>BTreeMap</code> 当 oracle(它显然有序、显然正确),把同一批 KV 喂进 SST,断言每个 key 读出的 value 一致——这把"偏移算错/字节序/二分边界"一网打尽。
+    再单独验<strong>边界键</strong>:比所有键小、比所有键大、中间不存在的——二分最容易在这三处出 off-by-one。</p>
+  </div>
+
+  <h3>代码 2 — round-trip + 差分 harness（加进 <code>sst.rs</code> 的 tests）</h3>
+  <pre>    <span class="k">use</span> std::collections::BTreeMap;
+    <span class="k">use</span> tempfile::tempdir;
+
+    <span class="c">// 格式 round-trip:build -> open -> 全键可读 + 边界返回 None</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">build_open_roundtrip</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"1.sst"</span>);
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">new</span>();
+        b.<span class="f">add</span>(b<span class="s">"apple"</span>, b<span class="s">"red"</span>).<span class="f">unwrap</span>();
+        b.<span class="f">add</span>(b<span class="s">"banana"</span>, b<span class="s">"yellow"</span>).<span class="f">unwrap</span>();
+        b.<span class="f">add</span>(b<span class="s">"cherry"</span>, b<span class="s">""</span>).<span class="f">unwrap</span>(); <span class="c">// 空 value</span>
+        b.<span class="f">finish</span>(&path).<span class="f">unwrap</span>();
+
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(r.<span class="f">len</span>(), 3);
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"apple"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"red"</span>[..]));
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"cherry"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">""</span>[..]));
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"aardvark"</span>), None); <span class="c">// &lt; 所有键</span>
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"zebra"</span>), None);    <span class="c">// &gt; 所有键</span>
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"berry"</span>), None);    <span class="c">// 中间不存在</span>
+    }
+
+    <span class="c">// 差分:随机有序输入,SST.get == BTreeMap.get</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">matches_btreemap_oracle</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"o.sst"</span>);
+        <span class="k">let</span> <span class="k">mut</span> model = BTreeMap::<span class="f">new</span>();
+        <span class="k">for</span> i <span class="k">in</span> 0..500u32 { model.<span class="f">insert</span>(<span class="f">format!</span>(<span class="s">"key{:05}"</span>, i*7 % 1000), <span class="f">format!</span>(<span class="s">"val{}"</span>, i)); }
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">new</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> &model { b.<span class="f">add</span>(k.<span class="f">as_bytes</span>(), v.<span class="f">as_bytes</span>()).<span class="f">unwrap</span>(); } <span class="c">// BTreeMap 迭代有序 -&gt; add 升序成立</span>
+        b.<span class="f">finish</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> &model {
+            <span class="f">assert_eq!</span>(r.<span class="f">get</span>(k.<span class="f">as_bytes</span>()).<span class="f">as_deref</span>(), Some(v.<span class="f">as_bytes</span>()));
+        }
+        <span class="f">assert_eq!</span>(r.<span class="f">get</span>(b<span class="s">"nope"</span>), None);
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test sst</div>
+  <div class="done"><div class="kicker">三个全绿就过</div><p style="margin:.3em 0 0"><code>rejects_unsorted ... ok</code><br><code>build_open_roundtrip ... ok</code><br><code>matches_btreemap_oracle ... ok</code></p></div>
+
+  <h2>🔄 CI/CD：加质量门（fmt + clippy）</h2>
+  <p>测试管"对不对",lint 管"地不地道"。给 <code>ci.yml</code> 加一个 <code>lint</code> job,<strong>格式不齐或 clippy 有话说就让 CI 红</strong>:</p>
+  <pre><span class="c"># 追加到 .github/workflows/ci.yml 的 jobs: 下</span>
+  <span class="t">lint</span>:
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - <span class="t">uses</span>: actions/checkout@v4
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+        <span class="t">with</span>: { <span class="t">components</span>: rustfmt, clippy }
+      - <span class="t">run</span>: cargo fmt --all --check
+      - <span class="t">run</span>: cargo clippy --all-targets -- -D warnings</pre>
+  <p>本地先跑一遍,过了再 push(<strong>你来跑</strong>):</p>
+  <div class="cmd">cd rocksdb-mini && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings</div>
+  <div class="harness" style="border-left-color:var(--good);background:#eef5ee;border-color:#cfe0cf">
+    <div class="kicker" style="color:var(--good)">这就是 C1 预告的 lint 咬人现场</div>
+    <p style="margin:.3em 0 0"><code>-D warnings</code> 把 clippy 的每条 warning 升级成<strong>错误</strong>。如果你 C1 的 <code>add</code> 写的是嵌套 <code>if</code>(没用 let-chain),这一步<strong>现在就会红</strong>,提示 <code>collapsible_if</code>。
+    去把它改成 let-chain → 再跑 → 绿。<strong>机器教你写地道代码</strong>的回路,跑通一次就长在手上了。
+    <code>fmt --check</code> 同理:只读不改,不齐就报;本地 <code>cargo fmt --all</code>(去掉 <code>--check</code>)一键格式化。</p>
+  </div>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">想清楚再进 C3</div>
+    <ol>
+      <li><strong>全量索引的代价</strong>:我们 index 每个 key 一项,全载内存。100 万个 16B key = 多大内存?RocksDB 稀疏块索引(每 ~4KB 块一项)能压到多少?块内怎么定位到精确 key?(Phase E 要做。)</li>
+      <li><strong>整文件入内存的代价</strong>:<code>open</code> 一次 <code>read_to_end</code> 把整个 SST 读进 <code>raw</code>。1GB 的 SST 怎么办?RocksDB 的 <code>get</code> 只读"需要的那个 block"——靠什么机制?(mmap / pread + block cache,Phase S。)</li>
+      <li><strong>二分 vs RocksDB 的两级查找</strong>:我们一次二分(全量 index)。RocksDB 是"二分块索引定位块 → 块内再找"两级。两级看似多一步,为什么在大文件上反而赢?(提示:cache 局部性 + 索引内存。)</li>
+      <li><strong>不可变的好处</strong>:SST 写完就只读,永不修改。这个"不可变"性质给并发读、给 cache、给 compaction 各带来什么便利?(对照 MemTable 的可变 + 并发控制。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_based_table_reader.cc">block_based_table_reader.cc</a> 看 <code>Open</code>/<code>Get</code> 的 footer→index→block 流程。</p>
+    <p><strong>下一步.</strong> 能写能读 → <a href="c3-flush.html">C3:用 <code>Engine::flush</code> 把冻结 MemTable 真正倒成 SST,跑跨持久化边界 round-trip</a>。Phase C 收尾。</p>
+    <p>不清楚的随时问我。</p>
+  </div>
+</div>
+</body>
+</html>

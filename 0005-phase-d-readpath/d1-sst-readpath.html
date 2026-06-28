@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D1 · 读路径接 SST + 重启发现</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">Phase D</a> &nbsp;·&nbsp; D1 &nbsp;·&nbsp; <a href="d2-immutable-merge.html">D2 →</a></div>
+
+  <div class="kicker">STEP D1 · Phase D 读路径</div>
+  <h1>读路径接 SST + 重启发现</h1>
+  <p>补上 Phase C 末尾那个<strong>故意的空洞</strong>:让 <code>Engine::get</code> 在 active MemTable 落空后,顺着<strong>新到旧</strong>的 SST 列表继续找;并让 <code>Engine::open</code> 在重启时<strong>从磁盘文件名重建</strong>那个 SST 列表。这两步合起来,数据第一次能"写进 SST → 重启 → 读回来"。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">给 <code>Engine</code> 加 <code>ssts: Vec&lt;SstReader&gt;</code>(新到旧);<code>get</code> 落空查 SST;<code>flush</code> 把新写的 reader 插到列表头;<code>open</code> 调 <code>discover_ssts</code> 扫盘装载并续 <code>next_sst</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> flush 后 <code>get</code> 能从 SST 读到(不再是 <code>None</code>);重开引擎后老 SST 仍可读、且新 flush 写的是 <code>000001.sst</code> 而非覆盖 <code>000000.sst</code>。</p>
+  </div>
+
+  <h3>为什么是"新到旧"(查找链锚)</h3>
+  <p>LSM 的每次覆盖写,不是原地改,而是<strong>追加一个更新的版本</strong>到更上层(memtable / 更新的 SST)。所以同一个 key 可能在多层都有副本,<strong>越上层越新</strong>。读路径必须按<strong>从新到旧</strong>扫,第一个命中就停——这样上层的新值自然把下层的旧值<strong>挡住(shadow)</strong>。我们现在没有删除/墓碑(Phase I 才有),所以"<strong>第一个 <code>Some</code> 即最新值</strong>"成立。对标 RocksDB <code>DBImpl::GetImpl</code>:先 <code>sv-&gt;mem-&gt;Get</code>,落空再 <code>sv-&gt;imm-&gt;Get</code>,再 <code>sv-&gt;current-&gt;Get</code>(查 SST);任一命中即 <code>done = true</code>。</p>
+  <span class="src">db/db_impl/db_impl.cc:3351 sv->mem->Get → :3365 sv->imm->Get → :3407 sv->current->Get</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>给 <code>Engine</code> 加字段 <code>ssts: Vec&lt;SstReader&gt;</code>(「代码 1」),并在 <code>open</code> 里用 <code>discover_ssts</code> 填它(「代码 2」)。</li>
+    <li>改 <code>get</code>:active 落空后 <code>find_map</code> 扫 SST(「代码 3」);改 <code>flush</code> 把刚写的 reader <code>insert(0, ..)</code> 插到头部(「代码 4」)。</li>
+    <li>敲入「代码 5」两个 harness,跑 <code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>Engine</code> 加字段(<span style="color:#3a6b3a">+ 为新增</span>)</h3>
+  <pre><span class="k">use</span> crate::sst::{SstBuilder<span class="add">, SstReader</span>};
+<span class="k">use</span> std::path::{Path, PathBuf};
+
+<span class="k">pub struct</span> <span class="t">Engine</span> {
+    dir: PathBuf,
+    mem: MemTable,
+<span class="add">+   ssts: Vec&lt;SstReader&gt;,   // 已落盘 SST;index 0 = 最新</span>
+    wal: Wal,
+    next_sst: u64,
+}</pre>
+
+  <h3>代码 2 — <code>open</code> 扫盘发现 SST</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">open</span>(dir: &Path) -> Result&lt;Self&gt; {
+        std::fs::<span class="f">create_dir_all</span>(dir)?;
+        <span class="k">let</span> wal_path = dir.<span class="f">join</span>(<span class="s">"wal.log"</span>);
+        <span class="k">let</span> mem = MemTable::<span class="f">new</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> Wal::<span class="f">replay</span>(&wal_path)? { mem.<span class="f">put</span>(k, v); }
+        <span class="k">let</span> wal = Wal::<span class="f">open_append</span>(&wal_path)?;
+<span class="add">+       let (ssts, next_sst) = Self::discover_ssts(dir)?;   // 扫盘 + 续号</span>
+        Ok(Self { dir: dir.<span class="f">to_path_buf</span>(), mem, ssts, wal, next_sst })
+    }
+
+<span class="add">+   /// 扫描 NNNNNN.sst,按编号升序解析;返回(新到旧的 reader, 下一个可用编号)。</span>
+<span class="add">+   /// 重开不读 manifest,纯靠文件名约定。RocksDB 靠 MANIFEST 精确登记(Phase L)。</span>
+<span class="add">+   fn discover_ssts(dir: &Path) -> Result&lt;(Vec&lt;SstReader&gt;, u64)&gt; {</span>
+<span class="add">+       let mut nums: Vec&lt;u64&gt; = Vec::new();</span>
+<span class="add">+       for entry in std::fs::read_dir(dir)? {</span>
+<span class="add">+           let path = entry?.path();</span>
+<span class="add">+           if path.extension().and_then(|e| e.to_str()) == Some("sst")</span>
+<span class="add">+               && let Some(stem) = path.file_stem().and_then(|s| s.to_str())</span>
+<span class="add">+               && let Ok(n) = stem.parse::&lt;u64&gt;()</span>
+<span class="add">+           { nums.push(n); }</span>
+<span class="add">+       }</span>
+<span class="add">+       nums.sort_unstable();</span>
+<span class="add">+       let next = nums.last().map_or(0, |n| n + 1);     // 续到 max+1,绝不覆盖</span>
+<span class="add">+       let mut ssts = Vec::with_capacity(nums.len());</span>
+<span class="add">+       for n in nums.into_iter().rev() {                // 编号大(新)的排前面</span>
+<span class="add">+           ssts.push(SstReader::open(&dir.join(format!("{n:06}.sst")))?);</span>
+<span class="add">+       }</span>
+<span class="add">+       Ok((ssts, next))</span>
+<span class="add">+   }</span></pre>
+
+  <div class="warnbox"><strong>续号是个真 bug 防线.</strong> Phase C 的 <code>open</code> 永远把 <code>next_sst</code> 设 0。一旦你重开后再 flush,就会写 <code>000000.sst</code> <strong>覆盖掉上次的</strong>——静默丢一整段数据。<code>discover_ssts</code> 把 <code>next_sst</code> 续到 <code>max+1</code>,这是 Phase D 顺手堵上的洞。</div>
+
+  <h3>代码 3 — <code>get</code> 接 SST 查找链</h3>
+  <pre>    <span class="c">/// active MemTable → SST(新到旧),第一个命中即返回。</span>
+    <span class="c">/// 暂无墓碑(Phase I 才有)→ "第一个 Some 即最新值" 成立。</span>
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[u8]) -> Option&lt;Value&gt; {
+        self.mem.<span class="f">get</span>(key)
+            .<span class="f">or_else</span>(|| self.ssts.<span class="f">iter</span>().<span class="f">find_map</span>(|r| r.<span class="f">get</span>(key)))
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>ssts</code> 是新到旧排的,<code>find_map</code> 返回<strong>第一个</strong>(=最新)命中。一行就是整条"新到旧、命中即停"的语义。</p>
+
+  <h3>代码 4 — <code>flush</code> 注册新 reader</h3>
+  <pre>    <span class="k">pub fn</span> <span class="f">flush</span>(&mut self) -> Result&lt;PathBuf&gt; {
+        <span class="k">let</span> path = self.dir.<span class="f">join</span>(format!(<span class="s">"{:06}.sst"</span>, self.next_sst));
+        self.next_sst += 1;
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">new</span>();
+        <span class="k">for</span> (k, v) <span class="k">in</span> self.mem.<span class="f">iter</span>() { b.<span class="f">add</span>(&k, &v)?; }
+        b.<span class="f">finish</span>(&path)?;
+<span class="add">+       self.ssts.insert(0, SstReader::open(&path)?);  // 刚写的最新,插到头部</span>
+        self.mem = MemTable::<span class="f">new</span>();
+        self.wal = Wal::<span class="f">reset</span>(&self.dir.<span class="f">join</span>(<span class="s">"wal.log"</span>))?;
+        Ok(path)
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">注意顺序仍是 Phase C 的铁律:<code>finish</code> 落盘成功,才 <code>open</code> 注册、才截 WAL。<code>insert(0, ..)</code> 维持"新到旧"不变量。<em>(D2 会把 flush 推广到排空多个 immutable;这里先保持 Phase C 的单表签名。)</em></p>
+
+  <h2>🧰 Coding style:Option 组合子串成查找链 · 不变量编码进数据结构序</h2>
+  <ul>
+    <li><strong><code>or_else</code> 短路链</strong>:<code>mem.get(k).or_else(|| ssts...)</code> 把"逐层 fallback、命中即停"写成一条<strong>声明式</strong>表达式,而不是一串 <code>if let Some(..) return</code>。<code>or_else</code> 惰性——前一层命中,后面的闭包<strong>根本不执行</strong>。等价于 RocksDB 那段 <code>if mem->Get(..) done=true; else if imm->Get(..) ...</code> 的命令式短路,但更难写错。可迁移到任意有 <code>Option</code>/<code>Maybe</code>/<code>?:</code> 的语言。</li>
+    <li><strong><code>find_map</code> = "找第一个能映射成功的"</strong>:对新到旧的 reader 列表,<code>find_map(|r| r.get(k))</code> 一次表达"扫到第一个 <code>Some</code> 就停并返回它"。比手写下标循环 + break 更不易出错。</li>
+    <li><strong>把不变量编码进数据结构的"序"</strong>:整个读路径的正确性,押在 <code>ssts</code> <strong>永远新到旧排列</strong>这一条不变量上。我们用两个动作守住它:<code>flush</code> 时 <code>insert(0, ..)</code>(新的进头),<code>discover</code> 时 <code>.rev()</code>(大编号在前)。<strong>不变量一旦由结构保证,查找代码就能极简(一行 <code>find_map</code>)。</strong>这是"让数据结构替你记住规则"的范式。</li>
+  </ul>
+
+  <h2>🧠 System mindset:分层查找 · 新到旧覆盖 · "最近写在最前"</h2>
+  <p>"维护多个版本、查询时从新到旧扫、第一个命中即停"——这不是 LSM 专利,是<strong>一类极通用的覆盖语义</strong>。哪里有"新配置/新定义覆盖旧的、但旧的还留着",哪里就是这个形状:</p>
+  <table>
+    <thead><tr><th>领域</th><th>"新到旧、第一个命中即停"长这样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>操作系统</strong></td><td><code>$PATH</code> 查找:左边的目录先命中即用;进程<strong>页表多级</strong>从顶层往下走第一个有效映射</td></tr>
+      <tr><td><strong>编程语言</strong></td><td><strong>作用域链 / 原型链</strong>:内层变量遮蔽外层;JS 原型链、Python MRO 找第一个有该属性的类</td></tr>
+      <tr><td><strong>网络</strong></td><td><strong>路由表最长前缀匹配</strong>、防火墙规则"首条匹配即生效"、DNS 解析器缓存优先于权威</td></tr>
+      <tr><td><strong>版本控制</strong></td><td>Git:<code>HEAD</code> → 父提交链;一个文件的"当前内容"是从最新提交往回找的第一个版本</td></tr>
+      <tr><td><strong>构建/容器</strong></td><td>OverlayFS / Docker 镜像分层:上层文件遮蔽下层同名文件(<strong>和 LSM 几乎同构</strong>)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:见到"多版本叠放 + 覆盖"语义,立刻问三件事——(1) <strong>层序</strong>是什么(谁更新)?(2) 查找是<strong>命中即停</strong>(覆盖)还是<strong>全收集再合并</strong>(如 merge operator / CSS 层叠)?(3) <strong>删除</strong>怎么表达?LSM 这里"命中即停 + 暂无删除",所以一行 <code>find_map</code> 就够;等 Phase I 加了墓碑,"删除"就得是一个能命中并<strong>返回 None 语义</strong>的特殊版本——届时这条链要升级。OverlayFS 用 <code>.wh.</code> whiteout 文件解决同一问题,正是同构的设计点。</p>
+
+  <h2>🧪 Harness 系统:重启重发现(跨进程持久)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这样验</div>
+    <p style="margin:.3em 0 0">读路径的持久性 bug 只有<strong>跨一次进程重启</strong>才暴露:内存里的 <code>ssts</code> 列表重启就没了,必须<strong>纯从磁盘文件名</strong>重建。这个 harness 用一对花括号 <code>{ }</code> 制造"第一段生命周期写盘 → drop → 第二个 <code>Engine::open</code> 冷启动"的边界,逼着 <code>discover_ssts</code> 真干活。它还顺带验<strong>续号</strong>:重开后再 flush 必须写新编号,不能覆盖。这类"建立状态 → 销毁运行时 → 冷重建 → 校验"的 harness,在数据库恢复、配置热加载、缓存预热里都通用。</p>
+  </div>
+
+  <h3>代码 5 — 两个 harness(接 <code>engine.rs</code> 的 tests)</h3>
+  <pre>    <span class="c">// D1 核心:flush 后 get 能从 SST 读到(Phase C 那个"故意空洞"补上)。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">get_reads_from_sst_after_flush</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"apple"</span>),  <span class="f">bytes</span>(<span class="s">"red"</span>)).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"banana"</span>), <span class="f">bytes</span>(<span class="s">"yellow"</span>)).<span class="f">unwrap</span>();
+        e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"apple"</span>),  <span class="f">bytes</span>(<span class="s">"green"</span>)).<span class="f">unwrap</span>(); <span class="c">// 覆盖</span>
+        e.<span class="f">flush</span>().<span class="f">unwrap</span>();
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"apple"</span>).<span class="f">as_deref</span>(),  Some(&b<span class="s">"green"</span>[..])); <span class="c">// 从 SST 读,最新值</span>
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"banana"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"yellow"</span>[..]));
+        <span class="f">assert_eq!</span>(e.<span class="f">get</span>(b<span class="s">"missing"</span>), None);
+    }
+
+    <span class="c">// D1 重启:open 重新发现 *.sst 并能读回;next_sst 续号不覆盖旧文件。</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">reopen_rediscovers_ssts</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        { <span class="k">let</span> <span class="k">mut</span> e = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>();
+          e.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"x"</span>), <span class="f">bytes</span>(<span class="s">"1"</span>)).<span class="f">unwrap</span>();
+          e.<span class="f">flush</span>().<span class="f">unwrap</span>(); }                       <span class="c">// 000000.sst,然后 drop</span>
+        <span class="k">let</span> <span class="k">mut</span> e2 = Engine::<span class="f">open</span>(dir.<span class="f">path</span>()).<span class="f">unwrap</span>(); <span class="c">// 冷启动,扫盘重建</span>
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"x"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"1"</span>[..]));  <span class="c">// 不再是 None!</span>
+        e2.<span class="f">put</span>(<span class="f">bytes</span>(<span class="s">"y"</span>), <span class="f">bytes</span>(<span class="s">"2"</span>)).<span class="f">unwrap</span>();
+        e2.<span class="f">flush</span>().<span class="f">unwrap</span>();                              <span class="c">// 写 000001.sst,不覆盖</span>
+        <span class="f">assert!</span>(dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"000000.sst"</span>).<span class="f">exists</span>());
+        <span class="f">assert!</span>(dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"000001.sst"</span>).<span class="f">exists</span>());
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"x"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"1"</span>[..]));
+        <span class="f">assert_eq!</span>(e2.<span class="f">get</span>(b<span class="s">"y"</span>).<span class="f">as_deref</span>(), Some(&b<span class="s">"2"</span>[..]));
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">小工具 <code>fn bytes(s:&str)-&gt;Bytes { Bytes::copy_from_slice(s.as_bytes()) }</code> 放 <code>tests</code> 模块顶,省得到处写 <code>Bytes::from</code>。</p>
+
+  <div class="cmd">cd rocksdb-mini && cargo test</div>
+  <div class="done"><div class="kicker">D1 判定 — 全绿</div><p style="margin:.3em 0 0"><code>engine::tests::get_reads_from_sst_after_flush ... ok</code><br><code>engine::tests::reopen_rediscovers_ssts ... ok</code><br>(含 A/B/C 全部回归)</p></div>
+
+  <h2>🔄 CI/CD:加一档 integration job</h2>
+  <p>流水线已有 <code>test</code> + <code>lint</code> 两档(C1/C2/C3)。Phase D 的测试开始有"<strong>端到端</strong>"味道(重启、跨进程、后面 D2 的长跑差分)。给它单列一档 <code>integration</code>,和单元 <code>test</code> <strong>并行</strong>跑——失败时一眼看出是哪一类挂了:</p>
+  <pre><span class="c"># .github/workflows/ci.yml — 新增 integration 档(test/lint 不变)</span>
+  <span class="t">integration</span>:
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - <span class="t">uses</span>: actions/checkout@v4
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+      - <span class="t">uses</span>: Swatinem/rust-cache@v2
+      - <span class="t">run</span>: cargo test --all engine::tests -- --nocapture --test-threads=1
+        <span class="c"># 单线程 + 不吞输出:D2 分层差分若挂,失败信息带 "step N" 一眼定位</span></pre>
+  <p style="font-size:.9em;color:var(--soft)">整份 yml 我已在参考实现本地验过:三档(test/integration/lint)YAML 合法、各自命令真跑过(<code>cargo test --all</code> 10 绿、<code>engine::tests</code> 过滤 7 绿、<code>fmt</code>/<code>clippy</code> 干净)。<strong>CI/CD 弧线</strong>:C 搭起 test→lint→cache,D 加"测试分层"(单元 vs 集成),M5 会再加多平台矩阵 + 覆盖率。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">D1 想透这几个</div>
+    <ol>
+      <li><strong>读放大</strong>:现在 <code>get</code> 一个不存在的 key,最坏要扫几个 SST?每个 SST 的 <code>get</code> 是 O(log n) 二分。10 个 SST、查一个 miss,要做多少次二分?这就是 LSM 的<strong>读放大</strong>。哪两个后续 phase 专治它?(提示:每 SST 一个 <strong>bloom</strong> 先否定 / 把 SST 按 key range <strong>分层</strong>只查相关的。)</li>
+      <li><strong>线性扫 vs 按 range 二分</strong>:我们对 SST 列表<strong>线性</strong>扫(<code>find_map</code>)。RocksDB 在 L1+ 是"每层 SST 按 key range 不重叠,二分定位到唯一可能的那个 SST"。为什么 L0 仍然必须线性扫所有文件,而 L1+ 不用?(想想 L0 的文件是 flush 直出、range 互相<strong>重叠</strong>。)</li>
+      <li><strong>discover 的脆弱点</strong>:<code>discover_ssts</code> 信任"凡是 <code>NNNNNN.sst</code> 就是有效 SST"。如果上次 flush 在 <code>finish</code> 写到一半崩了,留下半截 <code>000003.sst</code>,这次 <code>open</code> 会怎样?(提示:<code>SstReader::open</code> 读 footer magic——半截文件没有合法 footer。这一步会 <code>Err</code> 还是被静默跳过?当前实现是哪种?这正是 RocksDB 要 <strong>MANIFEST</strong> "只认登记过的 SST" 的原因——Phase L。)</li>
+      <li><strong>句柄成本</strong>:每个 <code>SstReader</code> 现在把整个文件读进内存(<code>raw: Vec&lt;u8&gt;</code>)。100 个 SST 各 64MB 会怎样?真引擎用 <strong>table cache</strong>(Phase T)+ <strong>block cache</strong>(Phase S)按需打开/缓存,而非全载。</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:D2 — immutable 表层 + 分层差分.</strong> 现在查找链只有两层(active → SST)。D2 在中间塞进 <strong>immutable memtable 列表</strong>:flush 不再瞬间完成,而是先 <code>freeze</code>(active 转 immutable,仍可读)、再慢慢落盘。<code>get</code> 要学会夹查这一层。届时上线本 Lab 的<strong>旗舰 harness:分层查找差分</strong>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/version_set.cc">version_set.cc</a> <code>Version::Get</code>(SST 侧逐层查找,db/version_set.cc:2918)。</p>
+    <p>想完跟我对答案,或说"继续 D2"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

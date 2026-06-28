@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase F · SST iterator — mini-LSM 自建引擎</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.2em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:34px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:23px;margin:2.2em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:18px;margin:1.6em 0 .4em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2);text-decoration:none;border-bottom:1px solid #bcd}
+  a:hover{background:#eef4f8}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:19px;color:#333}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:16px 20px;margin:1.4em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:4px;font-size:.95em}
+  .cards{display:grid;gap:14px;margin:1.2em 0}
+  .card{display:block;border:1px solid var(--rule);border-radius:6px;padding:18px 20px;background:#fff;color:var(--ink)}
+  .card:hover{border-color:var(--accent);box-shadow:0 3px 14px rgba(0,0,0,.06)}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;color:var(--accent);letter-spacing:.1em}
+  .card h3{margin:.2em 0 .3em;color:var(--ink)}
+  .card p{margin:.2em 0;font-size:.92em;color:var(--soft)}
+  .meta{font-family:ui-monospace,monospace;font-size:.78em;color:var(--soft);margin-top:.6em}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:12px 18px;border-radius:6px;font-size:.92em}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:10px 18px;border-radius:4px;margin:1em 0}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0006-phase-e-block-sst/index.html">Phase E</a> &nbsp;·&nbsp; Phase F</div>
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0007</div>
+  <h1>Phase F — SST iterator(从"点查"到"有序游标")</h1>
+  <p class="lede">到 Phase E 为止,SST 只会一件事:<strong><code>get(key)</code> 点查</strong>——给一个 key,二分定位、读一块、返回值。但 LSM 的另一半能力是<strong>范围扫描</strong>:"从 key <code>k</code> 开始,按序把后面的 key 一个个吐出来"。这需要一个全新的抽象——<strong>迭代器(iterator)</strong>:一个能 <code>seek</code> 到某处、然后 <code>next</code> 一步步前进、随时能问"当前停在哪(<code>key</code>/<code>value</code>)、还有没有(<code>valid</code>)"的<strong>有序游标</strong>。这一阶段先给<strong>一个 block</strong>、再给<strong>一个 SST</strong> 装上迭代器,并立起整条读路径未来都要遵守的 <strong>迭代器契约</strong>。它是 Phase G(k 路归并)、Phase K(对外扫描 API)的地基。</p>
+
+  <div class="mission">
+    <strong>Mission 锚点.</strong> <strong>迭代器是计算机科学里最通用的抽象之一</strong>:任何语言的 <code>for-each</code>、Python 的 generator、Java 的 <code>Iterator</code>、数据库的 cursor——本质都是"<strong>把一个数据源包装成"当前位置 + 前进一步"的惰性游标</strong>",调用方不必知道底下是数组、链表、文件块还是网络流。RocksDB 内部用一个统一的 <code>InternalIterator</code> 接口(<code>Seek/Next/Valid/key/value</code>)把 memtable、block、SST、甚至归并器全部抹平成同一种东西——正因如此,上层的归并、范围扫描、compaction 才能用一套代码处理所有数据源。我们这一阶段就立起这个接口(<code>trait LsmIterator</code>),对标 <code>block_based_table_iterator</code> 与 <code>InternalIterator</code>。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">本 Lab 宣称的 GOAL</div>
+    <ol style="margin:.4em 0">
+      <li><strong>迭代器契约</strong>:定义 <code>trait LsmIterator</code> = <code>seek_to_first / seek(target) / next / valid / key / value</code>。这是所有数据源对外统一的"有序游标"协议。</li>
+      <li><strong>BlockIter</strong>:在<strong>一个 block 内</strong>实现该 trait。<code>seek(target)</code> 块内二分到第一个 ≥target 的 entry;<code>next</code> 前进一格;<code>key/value</code> 返回<strong>借入块缓冲</strong>的切片(零拷贝,承 E)。</li>
+      <li><strong>SstIter</strong>:在<strong>一个 SST(多块)内</strong>实现该 trait。借稀疏索引定位候选块、<strong>按需 <code>read_block</code></strong>(惰性);<code>next</code> 走到块尾自动<strong>跨到下一块</strong>。</li>
+    </ol>
+    <p style="margin:.4em 0 0"><strong>Done when:</strong> <code>cargo test</code> 全绿,含<strong>迭代器契约</strong>(seek_to_first 全程升序 == 排序 oracle;seek 落在第一个 ≥target;next 严格递增)、<strong>跨块边界</strong>(扫描穿过 block 接缝不漏不重)、<strong>惰性读放大</strong>(扫到第几块才读第几块)、<strong>零拷贝借用</strong>。引擎 <code>get</code> 行为一字不改。</p>
+  </div>
+
+  <div class="milestone">🏁 <strong>本 Lab 不改对外 <code>get</code>,而是给 SST 长出"游标"这条新能力线</strong>。点查回答"k 的值是多少",迭代器回答"从 k 起,按序还有什么"——后者是范围扫描、归并、compaction 的共同原语。</div>
+
+  <h3>一图看清:点查(E) → 有序游标(F)</h3>
+  <svg viewBox="0 0 700 250" font-family="ui-monospace,monospace" font-size="11">
+    <text x="10" y="20" fill="#7a3b2e" font-size="12">Phase E:get(k) — 一问一答,定位一块、读一个值</text>
+    <rect x="10" y="30" width="120" height="30" fill="#fff" stroke="#7a3b2e"/>
+    <text x="70" y="50" text-anchor="middle" fill="#7a3b2e">get("k042")</text>
+    <line x1="130" y1="45" x2="250" y2="45" stroke="#7a3b2e" marker-end="url(#a)"/>
+    <rect x="250" y="30" width="160" height="30" fill="#fcf3ee" stroke="#c98a6a"/>
+    <text x="330" y="50" text-anchor="middle" fill="#7a3b2e">value 或 None</text>
+
+    <text x="10" y="105" fill="#2e5d7a" font-size="12">Phase F:seek(k) 定位,然后 next 一路吐有序流</text>
+    <rect x="10" y="115" width="110" height="30" fill="#fff" stroke="#2e5d7a"/>
+    <text x="65" y="135" text-anchor="middle" fill="#2e5d7a">seek("k042")</text>
+    <rect x="135" y="115" width="70" height="30" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="170" y="135" text-anchor="middle" fill="#3a5a2a">k042</text>
+    <rect x="207" y="115" width="70" height="30" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="242" y="135" text-anchor="middle" fill="#3a5a2a">k043</text>
+    <rect x="279" y="115" width="70" height="30" fill="#fff7d6" stroke="#7a9a5a" stroke-width="2"/>
+    <text x="314" y="135" text-anchor="middle" fill="#3a5a2a">k044 ┃跨块</text>
+    <rect x="351" y="115" width="70" height="30" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="386" y="135" text-anchor="middle" fill="#3a5a2a">k045</text>
+    <text x="430" y="135" fill="#888">→ next → next → …</text>
+    <text x="135" y="163" fill="#888" font-size="10">block N</text>
+    <text x="290" y="163" fill="#888" font-size="10">block N+1(next 自动跨过去)</text>
+
+    <rect x="10" y="190" width="690" height="44" fill="#f2f5f3" stroke="#cfe0d2"/>
+    <text x="20" y="208" fill="#3a5a2a">契约:valid()⇔可问 key()/value() · next() 后 key 严格递增 · seek(t) 落在第一个 ≥t</text>
+    <text x="20" y="226" fill="#3a5a2a">惰性:扫到第 i 块才 read_block(i) — 不预读、不全载。这是 generator/流式处理的同一心法。</text>
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#7a3b2e"/></marker></defs>
+  </svg>
+
+  <h2>为什么自定义 trait,而不用 <code>std::iter::Iterator</code></h2>
+  <p>Rust 已有 <code>Iterator</code>,为什么还要自己定义一个?三处对不上,而这三处恰是 LSM 的命脉:</p>
+  <table>
+    <thead><tr><th>能力</th><th><code>std Iterator</code></th><th>我们要的 <code>LsmIterator</code></th></tr></thead>
+    <tbody>
+      <tr><td>定位</td><td>只能从头顺序 <code>next</code>,<strong>不能 seek</strong></td><td><code>seek(target)</code> 直接跳到第一个 ≥target——范围查询的入口</td></tr>
+      <tr><td>窥视当前</td><td><code>next()</code> 一调就<strong>消费并交出</strong>当前元素</td><td><code>valid()+key()</code> 能<strong>反复看当前头而不前进</strong>——k 路归并必须先比较各源的"当前头"再决定推谁</td></tr>
+      <tr><td>零拷贝</td><td><code>Item</code> 多为<strong>拥有值</strong>(Move)</td><td><code>key()/value()</code> 返回<strong>借入块缓冲的 <code>&amp;[u8]</code></strong>,不分配(承 E 的零拷贝)</td></tr>
+    </tbody>
+  </table>
+  <p>所以我们立一个 RocksDB 风格的<strong>内部迭代器协议</strong>:<code>seek_to_first / seek / next / valid / key / value</code>。它把"窥视当前头"和"前进"<strong>拆成两步</strong>(std 把它俩捆在 <code>next</code> 里),这正是归并能工作的前提——Phase G 的 <code>MergingIterator</code> 会持有一堆 <code>Box&lt;dyn LsmIterator&gt;</code>,每轮比较所有源的 <code>key()</code>、推进最小的那个。<strong>trait object 多态</strong>让 block、SST、memtable、归并器自己,全成为可互换的"有序源"。</p>
+
+  <h2>路线:三个最小步(每个数据源一个游标)</h2>
+  <p style="font-size:.92em;color:var(--soft)">F 的主题是<strong>把每一种数据源都包成同一个 <code>LsmIterator</code> 游标</strong>:block(F1)、SST(F2)、memtable(F3)。三个源同契约 → Phase G 的归并器就能一视同仁地吃它们,不必知道底下是内存跳表还是磁盘块。<strong>关键设计:<code>key()/value()</code> 返回裸 <code>&amp;[u8]</code>、比较谁小的规则不写死在 iterator 里(留给 G 的 MergeIterator 持比较器)</strong>——这样 Phase H 引入 InternalKey(seq+type)时,只换"存的 key 字节 + merge 比较器 + 上层解码"三处,<strong>trait 签名与各 Iter 的 next/valid 逻辑一字不动</strong>。本阶段只做<strong>正向</strong>(seek/next);反向 prev 是后续高级 phase。</p>
+  <p style="font-size:.92em;color:var(--soft)"><strong>另一条贯穿 F 的设计决策——游标「持什么数据」。</strong> 同一问题(谁拥有被迭代的数据、它活多久),两种源、两种答案,都绕开"独占 own"、也都<strong>不退快照</strong>:磁盘块不可变、且 <code>SstIter</code> 要<strong>跨块换块</strong> → <code>BlockIter</code>/<code>SstIter</code> 持 <strong><code>Arc&lt;Block&gt;</code> 引用计数共享句柄</strong>(多 reader 共享、与 Phase S block cache 咬合;不用 <code>&amp;'a</code> 因换块会撞自引用、cache 驱逐又是运行期 refcount——对标 RocksDB <code>CachableEntry&lt;Block&gt;</code>);内存跳表本就支持游标、只在一张表上滑不换对象 → <code>MemTableIter&lt;'a&gt;</code> 持 <strong>crossbeam <code>Entry&lt;'a&gt;</code> 借用游标</strong>(借<strong>外部</strong> map,O(log n) seek + O(1) next,零拷贝;"自引用只能快照"是把高层 <code>map::Entry</code> 和底层裸 skiplist 搞混的<strong>误判</strong>,F3 详述)。<strong>选 <code>Arc</code> 还是 <code>&amp;'a</code> 看"游标要不要换底层对象"——换 → Arc('static),不换 → 借用(带 'a)。两条都没退到 O(n) 快照。</strong></p>
+  <div class="cards">
+    <a class="card" href="f1-block-iterator.html">
+      <div class="step">STEP F1 · done</div>
+      <h3>迭代器契约 + BlockIter</h3>
+      <p>新建 <code>iterator.rs</code> 定义 <code>trait LsmIterator</code>。<code>block.rs</code> 加 <code>Block::lower_bound</code>(块内二分到第一个 ≥target)+ <code>BlockIter</code> 实现 trait。零拷贝 <code>key/value</code> 借入块缓冲。对标 <code>block_based_table_iterator</code> 块内游标。</p>
+      <div class="meta">harness 系统:<strong>迭代器契约(单块)+ 零拷贝借用</strong></div>
+    </a>
+    <a class="card" href="f2-sst-iterator.html">
+      <div class="step">STEP F2 · done</div>
+      <h3>SstIter:跨块惰性扫描</h3>
+      <p><code>sst.rs</code> 加 <code>SstIter</code>:借稀疏索引定位候选块、按需 <code>read_block</code>、<code>next</code> 走到块尾自动跨下一块。证明"稀疏索引 lower_bound 保证候选块必含答案" → <code>seek</code> 无需跨块修正。对标 <code>BlockBasedTableIterator</code>。</p>
+      <div class="meta">harness 系统:<strong>扫描差分 + 跨块边界 + 惰性读放大</strong></div>
+    </a>
+    <a class="card" href="f3-memtable-iterator.html">
+      <div class="step">STEP F3 · done</div>
+      <h3>MemTableIter:跳表包成游标</h3>
+      <p><code>memtable.rs</code> 给 skiplist 加 <code>iter()</code> 实现同一 <code>LsmIterator</code>。<code>&amp;self</code> 共享读下遍历有序跳表,iterator 借住 skiplist——顺带踩<strong>并发遍历 + 借用生命周期</strong>,预热 H/J 的无锁读历史。这是 Phase G 归并的第三个源。对标 <code>MemTableIterator</code>。</p>
+      <div class="meta">harness 系统:<strong>契约 + 与 SstIter 同 trait 差分(同数据两源同序)</strong></div>
+    </a>
+  </div>
+  <div class="ask" style="margin-top:1em"><strong>承接 Phase G.</strong> 三个源就位后,G 的 <code>MergeIterator</code> 持 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code> + 一个<strong>外置比较器</strong>,纯做 k 路归并(plain key,源优先级去重)。G 收尾切一片 <strong>minimal <code>scan(start..end)</code></strong> 当里程碑;真正的快照/墓碑感知扫描留到 Phase K。G 在 plain key 上跑通后,Phase H3 再把比较器换成 <code>InternalKeyComparator</code>——<strong>那次"重写"是刻意的教学点</strong>,让你亲历 seq 如何改变归并的去重语义。</div>
+
+  <h2>本 Lab 的 harness 主题:契约即可执行的测试</h2>
+  <p>迭代器的正确性不是"某次 seek 对了",而是一组<strong>必须永远成立的契约</strong>。把契约写成属性断言,用随机操作流去撞,比手写几个例子强得多。</p>
+  <table>
+    <thead><tr><th>Harness 系统</th><th>抓什么</th><th>用在</th></tr></thead>
+    <tbody>
+      <tr><td><strong>迭代器契约(单块)</strong></td><td>seek_to_first 后一路 next 到 invalid == 块内全部 entry 升序;seek(t) 落在第一个 ≥t;next 后 key 严格递增</td><td>F1</td></tr>
+      <tr><td><strong>零拷贝借用断言</strong></td><td><code>key()/value()</code> 返回的切片指针落在块缓冲地址区间内(借用,非副本)</td><td>F1</td></tr>
+      <tr><td><strong>扫描差分 vs oracle</strong></td><td>多块 SST,从随机 seek 点起的整条扫描 == <code>BTreeMap::range</code> 的同段输出</td><td>F2</td></tr>
+      <tr><td><strong>跨块边界</strong></td><td>seek 落在每块首/末键、块缝隙键;next 穿过 block 接缝不漏不重</td><td>F2</td></tr>
+      <tr><td><strong>惰性读放大</strong></td><td>seek 只读 1 块;扫 m 块 <code>blocks_read</code> 增量恰为 m(不全载文件)</td><td>F2</td></tr>
+    </tbody>
+  </table>
+
+  <div class="ask">
+    <strong>带着这个问题进 F1</strong>:迭代器的 <code>key()</code> 返回 <code>&amp;[u8]</code> 借入它内部持有的 block 缓冲。那么 <strong><code>next()</code> 之后,上一次 <code>key()</code> 拿到的切片还有效吗?</strong>(提示:在<strong>一个 block 内</strong> next 只是挪 <code>idx</code>,缓冲没动,旧切片其实还指着合法内存——但<strong>语义上</strong>你不该再用它。到 F2 跨块时,next 会<strong>换掉整个 block 缓冲</strong>,旧切片就真悬空了。Rust 的借用检查器会怎么帮你把这条"用完即弃"的契约<strong>编译期</strong>钉死?想想 <code>key(&amp;self)</code> 的借用 vs <code>next(&amp;mut self)</code> 的可变借用为什么天然互斥。)
+  </div>
+
+  <div class="foot">
+    <p><strong>前置.</strong> Phase E 就位:<code>block.rs</code> 有 <code>Block::entry_at / len</code>、<code>sst.rs</code> 有 <code>SstReader::read_block / index / blocks_read</code>。本 Lab <strong>新建 <code>iterator.rs</code>、扩 <code>block.rs</code>(BlockIter)、扩 <code>sst.rs</code>(SstIter)</strong>;<code>engine.rs</code> 一行不改。<code>lib.rs</code> 加 <code>pub mod iterator;</code>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/internal_iterator.h">internal_iterator.h</a>(<code>InternalIterator</code> 接口:Seek/Next/Valid/key/value)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_based_table_iterator.h">block_based_table_iterator.h</a>(两级:index iter + data block iter)· <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block.h">block.h</a>(<code>Block::Iter</code>)。</p>
+    <p><strong>下一站.</strong> Phase G:把 memtable 迭代器 + 多个 SstIter 用 <code>MergingIterator</code> 归并成<strong>一条全局有序流</strong>——本课立的 <code>trait LsmIterator</code> 在那里收获多态红利。</p>
+    <p><strong>卡住了问我.</strong></p>
+  </div>
+</div>
+</body>
+</html>

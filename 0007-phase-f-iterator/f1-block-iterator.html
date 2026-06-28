@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 · 迭代器契约 + BlockIter</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">Phase F</a> &nbsp;·&nbsp; F1 &nbsp;·&nbsp; <a href="f2-sst-iterator.html">F2 →</a></div>
+
+  <div class="kicker">STEP F1 · Phase F 迭代器</div>
+  <h1>迭代器契约 + BlockIter</h1>
+  <p>先立<strong>协议</strong>,再实现<strong>最小的一个数据源</strong>。协议 = <code>trait LsmIterator</code>,是 block / SST / memtable / 归并器将来全要遵守的"有序游标"接口。最小数据源 = <strong>一个 block</strong>:它早已是升序、已在内存(<code>Bytes</code> 缓冲),把它包成一个能 <code>seek/next</code> 的游标,几乎只是"管一个下标 <code>idx</code>"。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">新建 <code>iterator.rs</code>:定义 <code>trait LsmIterator</code>(<code>seek_to_first/seek/next/valid/key/value</code>)。<code>block.rs</code>:加 <code>Block::seg_start</code>(restart 上二分定段)、前缀压缩感知的 <code>BlockIter</code> 实现 trait。<code>lib.rs</code> 加 <code>pub mod iterator;</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 契约 harness 全绿——<code>seek_to_first</code> 后一路 <code>next</code> 到 <code>invalid</code> 吐出块内全部 entry 升序;<code>seek(t)</code> 落在第一个 ≥t;越界 <code>seek</code> 变 invalid。</p>
+  </div>
+
+  <h3>为什么先有"窥视当前"再有"前进"(归并锚)</h3>
+  <p>本课最该想透的设计:协议把 <strong>看当前(<code>valid</code>/<code>key</code>/<code>value</code>)</strong> 和 <strong>前进(<code>next</code>)</strong> <strong>拆成两个独立动作</strong>。<code>std::Iterator::next()</code> 把这俩捆死——一调既交出当前、又前进,<strong>没法在不前进的情况下反复看头</strong>。可 Phase G 的 k 路归并必须:<em>先看齐所有源的当前头 → 比出最小 → 只推进那一个源</em>。被推进的源 <code>next</code> 一下,其它源的头<strong>纹丝不动、还要再被看一次</strong>。所以"窥视"与"前进"必须解耦。这就是为什么数据库内部迭代器(RocksDB <code>InternalIterator</code>、LevelDB <code>Iterator</code>)全长成 <code>Valid/key/Next</code> 这副样子,而不是语言自带的 <code>Iterator</code>。</p>
+  <span class="src">table/internal_iterator.h — virtual void Seek(); virtual void Next(); virtual bool Valid() const; virtual Slice key() const;</span>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>iterator.rs</code>,定义 <code>trait LsmIterator</code>(「代码 1」);<code>lib.rs</code> 加 <code>pub mod iterator;</code>。</li>
+    <li><code>block.rs</code> 加 <code>Block::seg_start</code>(「代码 2」)+ 前缀压缩感知的 <code>BlockIter</code>(「代码 3」)。</li>
+    <li>敲入「代码 4」契约 harness,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>trait LsmIterator</code>(新建 iterator.rs)</h3>
+  <pre>    <span class="c">/// 统一的"有序游标"协议。block / SST / memtable / 归并器对外都长这样,</span>
+    <span class="c">/// 于是上层(归并、范围扫描、compaction)能用一套代码处理任意数据源。</span>
+    <span class="k">pub trait</span> <span class="t">LsmIterator</span> {
+        <span class="c">/// 定位到第一个 entry(最小 key)。</span>
+        <span class="k">fn</span> <span class="f">seek_to_first</span>(&mut self);
+        <span class="c">/// 定位到第一个 key &gt;= target 的 entry;若无(target 比所有 key 都大)则变 invalid。</span>
+        <span class="k">fn</span> <span class="f">seek</span>(&mut self, target: &[u8]);
+        <span class="c">/// 前进一格。仅 valid() 时调用有意义(契约:invalid 时别调)。</span>
+        <span class="k">fn</span> <span class="f">next</span>(&mut self);
+        <span class="c">/// 当前是否停在合法 entry 上。</span>
+        <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool;
+        <span class="c">/// 当前 key / value;仅 valid() 为真时可调。借入内部缓冲——零拷贝。</span>
+        <span class="k">fn</span> <span class="f">key</span>(&self) -> &[u8];
+        <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8];
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>key(&amp;self)->&amp;[u8]</code> 这个签名本身就把<strong>零拷贝钉成了类型契约</strong>:返回值借的是 <code>&amp;self</code>,你<strong>没法</strong>在这里现造一份副本再返回它的引用(临时值的引用编译不过)。所以实现者被迫返回"指向自己内部持有的那块缓冲"的切片——零拷贝不是靠自律,是编译器逼的。</p>
+
+  <div class="warnbox"><strong>⚠️ 承接 E4:块格式变了,没有 <code>entry_at(i)</code> 了。</strong> E4 给块加了<strong>前缀压缩 + restart 点</strong>:第 i 条 entry 只存"与前一条共享的前缀长 + 后缀",<strong>没法 O(1) 随机取第 i 条</strong>(要从 restart 段首往前重建)。所以本课的 <code>seek</code> <strong>不能</strong>写成"<code>entry_at(mid)</code> 二分"。改两点:① 二分只在 <strong>restart 点</strong>上做(restart 点存完整 key,可比);② 游标持一个 <code>cur_key</code> 缓冲,前进时<strong>增量重建</strong>当前 key。这正是 RocksDB <code>BlockIter</code> 的真实形态。</div>
+
+  <h3>代码 2 — <code>Block::seg_start</code>(restart 上二分;扩 block.rs)</h3>
+  <pre>    <span class="k">impl</span> <span class="t">Block</span> {
+        <span class="c">/// 找最后一个 restart_key &lt;= target 的段起点偏移;target 比首 restart 还小则从 0 起。</span>
+        <span class="c">/// 注意:二分的是 restart 数组(每个 restart 点存完整 key,可直接比),不是每条 entry。</span>
+        <span class="k">fn</span> <span class="f">seg_start</span>(&self, target: &[u8]) -> usize {
+            <span class="k">let</span> (<span class="k">mut</span> lo, <span class="k">mut</span> hi) = (0usize, self.restarts.<span class="f">len</span>());
+            <span class="k">while</span> lo &lt; hi {
+                <span class="k">let</span> mid = (lo + hi) / 2;
+                <span class="k">if</span> self.<span class="f">restart_key</span>(mid) &lt;= target { lo = mid + 1; } <span class="k">else</span> { hi = mid; }
+            }
+            <span class="k">if</span> lo == 0 { 0 } <span class="k">else</span> { self.restarts[lo - 1] <span class="k">as</span> usize }  <span class="c">// 段起点的块内偏移</span>
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)">这是 <strong>两级二分的外层</strong>:restart 数组上 lower_bound 把 target 锁进某个 ≤16 条的段;<code>BlockIter::seek</code> 再在段内线性扫(内层)。和 E4 的 <code>Block::get</code> 用的是同一套"restart 二分 + 段内扫",<code>get</code> 其实是它的退化(扫到判等即返回)。</p>
+
+  <h3>代码 3 — <code>BlockIter</code> 实现 trait(前缀压缩感知;扩 block.rs)</h3>
+  <pre>    <span class="k">use</span> std::sync::Arc;
+    <span class="k">use</span> crate::iterator::LsmIterator;
+
+    <span class="c">/// 块内有序游标。持 Arc&lt;Block&gt; 共享句柄;前进时增量重建当前 key 到 cur_key。</span>
+    <span class="k">pub struct</span> <span class="t">BlockIter</span> {
+        block: Arc&lt;Block&gt;,   <span class="c">// 共享句柄:块可被 cache 复用(Phase S),游标只持强引用不独占</span>
+        off: usize,          <span class="c">// 当前 entry 块内偏移;&gt;= entries_end 即 invalid(哨兵)</span>
+        next_off: usize,     <span class="c">// 下一条偏移(load 时算好,next 直接用)</span>
+        cur_key: Vec&lt;u8&gt;,    <span class="c">// 增量重建出的当前完整 key</span>
+        val: (usize, usize), <span class="c">// 当前 value 在 block.data 内的 (start, len)</span>
+    }
+    <span class="k">impl</span> <span class="t">BlockIter</span> {
+        <span class="k">pub fn</span> <span class="f">new</span>(block: Arc&lt;Block&gt;) -> Self {
+            <span class="k">let</span> <span class="k">mut</span> it = Self { block, off: 0, next_off: 0, cur_key: Vec::new(), val: (0, 0) };
+            it.<span class="f">load</span>(); it
+        }
+        <span class="c">/// 在 self.off 处重建 cur_key(承接已有 cur_key 增量)+ 记 value 范围 + next_off。</span>
+        <span class="k">fn</span> <span class="f">load</span>(&mut self) {
+            <span class="k">if</span> self.off &gt;= self.block.entries_end { <span class="k">return</span>; } <span class="c">// invalid:不动 cur_key</span>
+            <span class="k">let</span> (shared, _ns, suffix, value, next) = self.block.<span class="f">parse_at</span>(self.off);
+            self.cur_key.<span class="f">truncate</span>(shared);              <span class="c">// 留共享前缀</span>
+            self.cur_key.<span class="f">extend_from_slice</span>(suffix);     <span class="c">// 接本条后缀 → 完整 key</span>
+            self.val = (next - value.<span class="f">len</span>(), value.<span class="f">len</span>());
+            self.next_off = next;
+        }
+    }
+    <span class="k">impl</span> <span class="t">LsmIterator</span> <span class="k">for</span> <span class="t">BlockIter</span> {
+        <span class="k">fn</span> <span class="f">seek_to_first</span>(&mut self) { self.off = 0; self.cur_key.<span class="f">clear</span>(); self.<span class="f">load</span>(); }
+        <span class="k">fn</span> <span class="f">seek</span>(&mut self, target: &[u8]) {
+            <span class="k">if</span> self.block.restarts.<span class="f">is_empty</span>() { self.off = self.block.entries_end; <span class="k">return</span>; }
+            self.off = self.block.<span class="f">seg_start</span>(target);       <span class="c">// ① restart 二分定段</span>
+            self.cur_key.<span class="f">clear</span>(); self.<span class="f">load</span>();
+            <span class="k">while</span> self.<span class="f">valid</span>() && self.cur_key.<span class="f">as_slice</span>() &lt; target { self.<span class="f">next</span>(); } <span class="c">// ② 段内扫到 ≥target</span>
+        }
+        <span class="k">fn</span> <span class="f">next</span>(&mut self) {
+            <span class="k">if</span> self.off &gt;= self.block.entries_end { <span class="k">return</span>; }
+            self.off = self.next_off; self.<span class="f">load</span>();
+        }
+        <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool { self.off &lt; self.block.entries_end }
+        <span class="k">fn</span> <span class="f">key</span>(&self) -> &[u8] { &self.cur_key }
+        <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8] { &self.block.data[self.val.0..self.val.0 + self.val.1] }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>BlockIter</code> 写在 <code>block.rs</code> 内(同模块),才能读 <code>Block</code> 的私有字段 <code>parse_at / restarts / entries_end / data</code>(<code>Arc&lt;Block&gt;</code> 自动 <code>Deref</code> 到 <code>&amp;Block</code>,字段访问透明)。<code>key()</code> 借的是游标自己的 <code>cur_key</code>;<code>value()</code> 借的是块缓冲 <code>block.data</code>——value 仍<strong>零拷贝</strong>,key 因前缀压缩在缓冲里不连续、只能重建成 owned。</p>
+  <div class="harness" style="border-left-color:#7a5cff">
+    <div class="kicker">设计决策:迭代器该「持什么块」(domain modeling)</div>
+    <p style="margin:.3em 0 .5em">SST 落盘即<strong>不可变只读</strong> → 同一个块本该能被多个 reader 安全共享。那 <code>BlockIter</code> 到底该 <strong>own 块 / 借 <code>&amp;'a</code> 块 / 持引用计数句柄</strong>?三选一,排除法走一遍:</p>
+    <table>
+      <thead><tr><th>方案</th><th>形态</th><th>致命伤</th></tr></thead>
+      <tbody>
+        <tr><td><strong>own <code>Block</code></strong></td><td>迭代器独占整块</td><td>① 多 reader 无法共享同块(各拷一份);② <strong>让 Phase S 的 block cache 失去意义</strong>——cache 存一份、迭代器又拷一份,缓存白做</td></tr>
+        <tr><td><strong><code>&amp;'a Block</code></strong></td><td>编译期借用,绑某 owner 生命周期</td><td>① <code>SstIter</code> 跨块要<strong>换</strong>当前块 → 块得存在 SstIter 体内、同结构体内的 BlockIter 又借它 = <strong>自引用借用,编译器直接拒</strong>;② cache 驱逐是"还有人用就别淘汰"的<strong>运行期</strong> refcount,编译期 <code>'a</code> 表达不了</td></tr>
+        <tr><td><strong>✅ <code>Arc&lt;Block&gt;</code></strong></td><td>运行期引用计数的共享只读句柄</td><td>无。clone 廉价(只 +1 计数);最后一个持有者 drop 才释放;<strong>与 cache 天然咬合</strong></td></tr>
+      </tbody>
+    </table>
+    <p style="margin:.5em 0 0;font-size:.92em">你的直觉"<em>迭代器只持引用、块比迭代器活得久</em>"<strong>方向正确</strong>——但落地不是编译期 <code>&amp;'a</code> 借用,而是<strong>运行期共享引用 <code>Arc</code></strong>。理由:块的真实寿命由"谁还在用"决定(cache + 多个游标 + 跨块换块),这是个动态集合,只有 refcount 能精确表达,<code>'a</code> 这种静态生命周期标注表达不了。<strong>RocksDB 同结论</strong>:其 <code>BlockBasedTableIterator</code> 持 <code>CachableEntry&lt;Block&gt;</code> —— cache 感知的引用计数句柄,正是 <code>Arc&lt;Block&gt;</code> 的工业版(迭代期 pin 住块、用完交还 cache)。</p>
+    <p style="margin:.5em 0 0;font-size:.92em">落到代码:<code>read_block</code>(Phase S 后)返回 <code>Arc&lt;Block&gt;</code>,cache 命中即 <code>clone</code> 一份递出 → 迭代器持着它把块 <strong>pin</strong> 在内存,即便 cache 条目被淘汰、块也活到游标放手。本课测试用 <code>Arc::new(Block::decode(..))</code> 自造一个块;到 F2 就由 <code>SstReader</code> 递来。<span class="src">table/block_based/block_based_table_iterator.h — CachableEntry&lt;Block&gt; cachable_entry_; bool block_iter_points_to_real_block_;</span></p>
+  </div>
+
+  <div class="warnbox"><strong><code>off &gt;= entries_end</code> 当 invalid 哨兵,不用 <code>Option</code>.</strong> 越界偏移天然表达"扫完了":<code>valid</code> 一个比较、<code>next</code> 越过末尾自然 invalid、<code>seek</code> 超界时段内扫到尽头也落到 <code>entries_end</code>——同一套逻辑。这是用<strong>已有状态空间的边界值</strong>编码"无效",省掉一层包装(同 D1 空 SST 列表、A 的 approx_size)。<strong>前缀压缩把"下标 idx"换成了"偏移 off + cur_key 缓冲",但哨兵思路一字不变。</strong></div>
+
+  <h2>🧰 Coding style:接口/实现分离 · 哨兵编码 · 二分收敛为一</h2>
+  <ul>
+    <li><strong><code>trait</code> = 接口与实现解耦</strong>:协议定在 <code>iterator.rs</code>,谁都能实现。这让 Phase G 能写 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code> 把异构数据源(block/SST/memtable)装进同一个容器、统一驱动——<strong>面向接口编程</strong>的教科书用法,对应 Java interface、Go interface、C++ 抽象基类。</li>
+    <li><strong>一个二分喂两处</strong>:<code>seg_start</code>(restart 上的 lower_bound)同时服务 <code>BlockIter::seek</code>(本课)和 E4 的 <code>Block::get</code>(seg_start + 段内判等)。<strong>把"restart 定段"这一个原语抽出来</strong>,胜过到处手写边界易错的二分。前缀压缩让"段内"无法再二分,但"段间"仍是干净的二分。</li>
+    <li><strong>哨兵优于 Option</strong>:<code>off &gt;= entries_end</code> 表无效,比 <code>Option&lt;usize&gt;</code> 少一层解包,且 <code>seek/next/valid</code> 三者共享同一边界语义。</li>
+    <li><strong>不可变 + 引用计数 = 安全共享只读</strong>:<code>BlockIter</code> 持 <code>Arc&lt;Block&gt;</code> 而非 own/借用——块只读不变,<code>Arc</code> 让多个游标 + block cache 共享同一份、<code>clone</code> 只加计数。这是 Rust 缓存/快照/MVCC 类结构的主力范式,Phase S(block cache 存 <code>Arc&lt;Block&gt;</code>)、Phase H(MVCC 快照)还会反复用同一招。</li>
+  </ul>
+
+  <h2>🧠 System mindset:迭代器 = 惰性游标 · "窥视/前进"解耦</h2>
+  <p>迭代器把"一个有序数据源"抽象成<strong>当前位置 + 前进一步</strong>的最小接口,调用方不必知道底层是数组、文件块还是网络流。这个抽象无处不在:</p>
+  <table>
+    <thead><tr><th>领域</th><th>"有序游标"长这样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>语言</strong></td><td>Python generator / Java <code>Iterator</code> / C++ <code>begin..end</code> / Rust <code>Iterator</code>——<strong>惰性</strong>:要一个算一个,不预先全展开</td></tr>
+      <tr><td><strong>数据库(★)</strong></td><td>cursor / 火山模型(Volcano)算子:每个算子是个迭代器,<code>next</code> 向下游拉一行——<strong>整棵查询计划就是迭代器套迭代器</strong></td></tr>
+      <tr><td><strong>Unix</strong></td><td>管道 <code>a | b | c</code>:每段按需消费上游一块,背压自然形成</td></tr>
+      <tr><td><strong>归并(本阶段去向)</strong></td><td>k 路归并要求"<strong>看 k 个源的当前头、推最小的一个</strong>"——必须能<strong>窥视而不消费</strong></td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:当你要"统一处理一堆形态不同、但都能按序产出的数据源"时,<strong>先定义一个 <code>Valid/key/Next</code> 式游标接口,把"窥视当前"和"前进"拆开</strong>。这一拆,归并、去重、范围裁剪、多路合并全都解锁——它们的共同前提就是"能反复看头、按需推进"。语言自带的 <code>Iterator</code>(next 即消费)在需要<strong>多源协同</strong>时反而不够用,这正是所有数据库都自造内部迭代器的原因。</p>
+
+  <h2>🧪 Harness 系统:契约即可执行的测试</h2>
+  <div class="harness">
+    <div class="kicker">为什么验"契约"而非"几个例子"</div>
+    <p style="margin:.3em 0 0">迭代器的正确性是一组<strong>恒成立的性质</strong>,不是某次 seek 的结果:<em>(1) seek_to_first 后一路 next 到 invalid,吐出的序列 == 块内全部 entry 的升序;(2) seek(t) 后若 valid,则 <code>key() &gt;= t</code> 且是<strong>最小</strong>的这种;(3) 每次 next 后 key 严格递增。</em> 把这些写成断言,再用<strong>各种 target</strong>(命中键、缝隙键、空串、超界键)去打,比手写三五个例子稳得多。下一课 F2 会把它升级成"<strong>vs BTreeMap 的全量差分</strong>"。</p>
+  </div>
+
+  <h3>代码 4 — 契约 harness(接 block.rs 的 tests)</h3>
+  <pre>    <span class="k">use</span> std::sync::Arc;
+    <span class="k">use</span> crate::iterator::LsmIterator;
+
+    <span class="k">fn</span> <span class="f">build_block</span>() -> Bytes {                <span class="c">// k00..k19 升序,返回编码后的块字节</span>
+        <span class="k">let</span> <span class="k">mut</span> b = BlockBuilder::<span class="f">new</span>();
+        <span class="k">for</span> i <span class="k">in</span> 0..20u32 {
+            b.<span class="f">add</span>(format!(<span class="s">"k{i:02}"</span>).<span class="f">as_bytes</span>(), format!(<span class="s">"v{i:02}"</span>).<span class="f">as_bytes</span>());
+        }
+        b.<span class="f">finish</span>()
+    }
+
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">block_iter_full_scan_ascending</span>() {
+        <span class="k">let</span> bytes = <span class="f">build_block</span>();
+        <span class="k">let</span> <span class="k">mut</span> it = BlockIter::<span class="f">new</span>(Arc::<span class="f">new</span>(Block::<span class="f">decode</span>(bytes)));
+        it.<span class="f">seek_to_first</span>();
+        <span class="k">let</span> <span class="k">mut</span> n = 0u32;
+        <span class="k">let</span> <span class="k">mut</span> prev: Option&lt;Vec&lt;u8&gt;&gt; = None;
+        <span class="k">while</span> it.<span class="f">valid</span>() {
+            <span class="k">if</span> <span class="k">let</span> Some(p) = &prev { <span class="f">assert!</span>(p.<span class="f">as_slice</span>() &lt; it.<span class="f">key</span>(), <span class="s">"key 必须严格递增"</span>); }
+            <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), format!(<span class="s">"k{n:02}"</span>).<span class="f">as_bytes</span>());
+            <span class="f">assert_eq!</span>(it.<span class="f">value</span>(), format!(<span class="s">"v{n:02}"</span>).<span class="f">as_bytes</span>());
+            prev = Some(it.<span class="f">key</span>().<span class="f">to_vec</span>());
+            it.<span class="f">next</span>(); n += 1;
+        }
+        <span class="f">assert_eq!</span>(n, 20);                       <span class="c">// 不多不少</span>
+    }
+
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">block_iter_seek_lower_bound</span>() {
+        <span class="k">let</span> bytes = <span class="f">build_block</span>();
+        <span class="k">let</span> mk = || BlockIter::<span class="f">new</span>(Arc::<span class="f">new</span>(Block::<span class="f">decode</span>(bytes.<span class="f">clone</span>())));  <span class="c">// Bytes::clone = 引用计数+1,不拷贝缓冲</span>
+
+        <span class="k">let</span> <span class="k">mut</span> it = <span class="f">mk</span>(); it.<span class="f">seek</span>(b<span class="s">"k07"</span>);   <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k07"</span>);     <span class="c">// 命中</span>
+        <span class="k">let</span> <span class="k">mut</span> it = <span class="f">mk</span>(); it.<span class="f">seek</span>(b<span class="s">"k07x"</span>);  <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k08"</span>);     <span class="c">// 缝隙→下一个</span>
+        <span class="k">let</span> <span class="k">mut</span> it = <span class="f">mk</span>(); it.<span class="f">seek</span>(b<span class="s">""</span>);      <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k00"</span>);     <span class="c">// 空串→第一个</span>
+        <span class="k">let</span> <span class="k">mut</span> it = <span class="f">mk</span>(); it.<span class="f">seek</span>(b<span class="s">"zzz"</span>);   <span class="f">assert!</span>(!it.<span class="f">valid</span>());            <span class="c">// 超界→invalid</span>
+    }</pre>
+
+  <p style="font-size:.92em;color:var(--soft)"><strong>零拷贝.</strong> 在 F1 零拷贝几乎是免费的:<code>key/value</code> 签名 <code>(&amp;self)->&amp;[u8]</code> 已把"返回值借入 self 持有的 block"钉死。E1 那条"切片指针落在块缓冲地址区间内"的断言仍可复用作回归保险(它直接验地址,而非靠类型推理)。</p>
+
+  <div class="cmd">cd rocksdb-mini && cargo test block_iter</div>
+  <div class="done"><div class="kicker">F1 判定 — 全绿</div><p style="margin:.3em 0 0"><code>block::tests::block_iter_full_scan_ascending ... ok</code><br><code>block::tests::block_iter_seek_lower_bound ... ok</code><br>(E 的 block/sst 测试照旧全过)</p></div>
+
+  <h2>🔄 CI/CD:F1 进单元快档</h2>
+  <p>BlockIter 测试<strong>纯内存</strong>(造块在 RAM、无文件、无 fsync),秒级返回 → 落 <code>test</code> 单元快档,挡每次 push。F2 的跨块扫描差分(要写临时 SST、有 <code>sync_all</code>)才考虑放 integration 慢档。<strong>测试成本分层 = 反馈速度分层</strong>:纯逻辑用快档、碰盘的隔离进慢档,这条 D 阶段立的规矩继续贯彻。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">F1 想透这几个</div>
+    <ol>
+      <li><strong>为什么 <code>next</code> 是 <code>&amp;mut self</code> 而 <code>key</code> 是 <code>&amp;self</code></strong>:这对签名让"前进"和"窥视"在借用层面<strong>天然互斥</strong>——持有 <code>key()</code> 返回的 <code>&amp;[u8]</code>(不可变借用)期间,你<strong>无法</strong>调 <code>next()</code>(需要可变借用)。借用检查器是怎么把"<code>next</code> 后旧 <code>key</code> 切片失效"这条契约在<strong>编译期</strong>替你钉死的?(对比:C++ 的迭代器失效是运行期 UB,得靠程序员记住。)</li>
+      <li><strong><code>seek</code> 与 <code>get</code> 的关系</strong>:回看 E4 的 <code>Block::get(k)</code>——它已经是"<code>seg_start</code> 定段 + 段内扫到判等"。<code>BlockIter::seek</code> 用的是<strong>同一个 <code>seg_start</code></strong>,只是段内扫到"第一个 ≥k"就停、不判等。所以 <code>get(k)</code> 等价于"<code>seek(k)</code> 后若 <code>valid</code> 且 <code>key()==k</code> 返回 value,否则 None"——点查是扫描的退化情形,<strong>一套定位逻辑两边共用</strong>。想清楚:既然能共用,为什么 RocksDB 仍保留独立的 <code>Get</code> 路径而不全建在 iterator 上?(提示:bloom 过滤 + 命中即停的栈优化;见 F 设计笔记的"两路"取舍。)</li>
+      <li><strong>哨兵 vs Option</strong>:用 <code>off &gt;= entries_end</code> 表 invalid 省了 <code>Option</code>,代价是什么?(<code>key()</code> 在 invalid 时返回的是上一次 <code>load</code> 留下的<strong>陈旧 <code>cur_key</code></strong>、<code>value()</code> 用陈旧 <code>val</code> 范围——若调用方没先 <code>valid()</code> 就读,拿到的是脏值而非 panic。契约把"先 valid 再 key"的责任<strong>外推给调用方</strong>——性能与安全的取舍,RocksDB 同样如此。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:F2 — SstIter 跨块惰性扫描.</strong> 一个 block 的游标已通。SST 是<strong>多块</strong>:F2 用稀疏索引定位候选块、<strong>按需 read_block</strong>、<code>next</code> 走到块尾自动跨下一块。会证明一条漂亮性质——<strong>稀疏索引 lower_bound 选出的候选块必含答案,所以 seek 永不需要跨块修正</strong>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/internal_iterator.h">internal_iterator.h</a> · <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block.h">block.h</a>(<code>Block::Iter</code> 块内游标)。</p>
+    <p>想完跟我对答案,或说"继续 F2"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A2 · MemTable 点写读</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="a1-kv-types.html">← A1</a> &nbsp;·&nbsp; <a href="index.html">Phase A</a> &nbsp;·&nbsp; A2 &nbsp;·&nbsp; <a href="a3-size-freeze.html">A3 →</a></div>
+
+  <div class="kicker">STEP A2 · Phase A MemTable</div>
+  <h1>MemTable 点写读</h1>
+  <p>把 A1 的"序"装进一张<strong>并发有序表</strong>，包出 <code>put</code> / <code>get</code>。这是 RocksDB 写路径的终点，你在 learning-record 0005 读过它。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>src/memtable.rs</code>：<code>MemTable</code> 包一个 <code>SkipMap&lt;Bytes,Bytes&gt;</code>，<code>put(k,v)</code> 写入或覆盖，<code>get(&amp;[u8])</code> 返回最新值或 <code>None</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 模型差分 harness 跑 1000 步随机操作，MemTable 与 <code>BTreeMap</code> oracle 逐步一致。</p>
+  </div>
+
+  <h3>为什么是跳表（mission 锚）</h3>
+  <p>RocksDB 默认 MemTable 用 <code>InlineSkipList</code>——支持<strong>无锁并发读 + 单写者并发写</strong>，且天然有序（flush 成 SST 时无需再排序）。你不自己手写跳表（那是另一个 lab），用 <code>crossbeam-skiplist</code> 这个工业级实现当零件，把注意力放在 MemTable 的<strong>语义</strong>上：覆盖写、点查、有序。</p>
+  <span class="src">对标 db/memtable.cc · db/memtable.h · memtable/inlineskiplist.h</span>
+
+  <h3>一图看清这一步在哪</h3>
+  <svg viewBox="0 0 700 150" font-family="ui-monospace,monospace" font-size="12">
+    <rect x="10" y="55" width="110" height="40" rx="6" fill="#fff" stroke="#7a3b2e"/>
+    <text x="65" y="80" text-anchor="middle" fill="#7a3b2e">put(k,v)</text>
+    <line x1="120" y1="75" x2="160" y2="75" stroke="#999" marker-end="url(#a)"/>
+    <rect x="160" y="30" width="200" height="90" rx="6" fill="#f4f1e8" stroke="#7a3b2e" stroke-width="2"/>
+    <text x="260" y="22" text-anchor="middle" fill="#7a3b2e" font-weight="bold">MemTable (本步)</text>
+    <rect x="180" y="48" width="160" height="22" rx="4" fill="#fff" stroke="#bbb"/>
+    <text x="260" y="63" text-anchor="middle" fill="#555">SkipMap&lt;Bytes,Bytes&gt;</text>
+    <text x="260" y="92" text-anchor="middle" fill="#888">有序 · 并发 · 覆盖写</text>
+    <text x="260" y="108" text-anchor="middle" fill="#888">get → 最新值 / None</text>
+    <line x1="360" y1="75" x2="400" y2="75" stroke="#999" stroke-dasharray="4" marker-end="url(#a)"/>
+    <rect x="400" y="50" width="130" height="50" rx="6" fill="#eef" stroke="#2e5d7a" stroke-dasharray="4"/>
+    <text x="465" y="72" text-anchor="middle" fill="#2e5d7a">满 → 冻结</text>
+    <text x="465" y="90" text-anchor="middle" fill="#888" font-size="10">A3 / Phase C</text>
+    <line x1="530" y1="75" x2="570" y2="75" stroke="#999" stroke-dasharray="4" marker-end="url(#a)"/>
+    <rect x="570" y="50" width="120" height="50" rx="6" fill="#fff" stroke="#aaa" stroke-dasharray="4"/>
+    <text x="630" y="79" text-anchor="middle" fill="#888">SST (Phase C)</text>
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#999"/></marker></defs>
+  </svg>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>src/memtable.rs</code>，敲入「代码 1」。</li>
+    <li><code>src/lib.rs</code> 加 <code>pub mod memtable;</code>。</li>
+    <li>敲入「代码 2」模型差分 harness。</li>
+    <li>跑命令看绿。若 <code>get</code> 编不过，看下方红框——这是个真实坑，自己撞自己修。</li>
+  </ol>
+
+  <h3>代码 1 — <code>src/memtable.rs</code>（核心）</h3>
+  <pre><span class="c">// src/memtable.rs — 内存写缓冲，LSM 写路径终点</span>
+<span class="k">use</span> bytes::Bytes;
+<span class="k">use</span> crossbeam_skiplist::SkipMap;
+<span class="k">use</span> crate::kv::{Key, Value};
+
+<span class="k">pub struct</span> <span class="t">MemTable</span> {
+    <span class="c">// SkipMap：无锁并发跳表。K 用自身 Ord（= A1 的字节序，见核心问题 1）。</span>
+    map: SkipMap&lt;Bytes, Bytes&gt;,
+}
+
+<span class="k">impl</span> <span class="t">MemTable</span> {
+    <span class="k">pub fn</span> <span class="f">new</span>() -> Self {
+        Self { map: SkipMap::<span class="f">new</span>() }
+    }
+
+    <span class="c">/// 写入或覆盖。同 key 再写 = 新值盖旧值（LSM 的"逻辑更新即追加新版本"）。</span>
+    <span class="k">pub fn</span> <span class="f">put</span>(&self, key: Key, value: Value) {
+        self.map.<span class="f">insert</span>(key, value);
+    }
+
+    <span class="c">/// 点查。返回该 key 的当前值；不存在返回 None。</span>
+    <span class="k">pub fn</span> <span class="f">get</span>(&self, key: &[<span class="t">u8</span>]) -> Option&lt;Value&gt; {
+        self.map.<span class="f">get</span>(key).<span class="f">map</span>(|e| e.<span class="f">value</span>().<span class="f">clone</span>()) <span class="c">// Bytes clone = O(1) 浅拷贝</span>
+    }
+}
+
+<span class="k">impl</span> Default <span class="k">for</span> <span class="t">MemTable</span> {
+    <span class="k">fn</span> <span class="f">default</span>() -> Self { Self::<span class="f">new</span>() }
+}</pre>
+
+  <div class="warnbox">
+    <strong>值得停一秒.</strong> <code>get</code> 传 <code>&amp;[u8]</code> 就能查 <code>SkipMap&lt;Bytes,_&gt;</code>——它<strong>能编过</strong>，但为什么？
+    <code>map.get(key)</code> 的签名是 <code>get&lt;Q&gt;(&amp;self, &amp;Q) where Bytes: Borrow&lt;Q&gt;, Q: Ord</code>，而标准库给了 <code>impl Borrow&lt;[u8]&gt; for Bytes</code>，于是 <code>Q=[u8]</code> 成立。
+    这和 <code>HashMap&lt;String,_&gt;.get(&amp;str)</code> 是同一个 <code>Borrow</code> 机制：<strong>查找不必拥有 key 的所有权</strong>，省掉一次为了查询而做的堆分配。
+    试试把参数改成 <code>&amp;Bytes</code> 或 <code>Vec&lt;u8&gt;</code>，体会差别——这正是 Rust 把这条性能性质编进类型系统的地方。
+  </div>
+
+  <h2>Harness 系统 ②：模型差分 (oracle)</h2>
+  <div class="harness">
+    <div class="kicker">为什么这里用模型差分</div>
+    <p style="margin:.3em 0 0">点写读的 bug 往往是<strong>状态依赖</strong>的：第 37 次覆盖后某 key 读出旧值。手写表驱动用例覆盖不到这种序列态。
+    办法：拿一个"显然正确但慢"的参考实现当 <strong>oracle</strong>（这里是 <code>std::BTreeMap</code>），对两者喂<strong>同一串随机操作</strong>，每步比对。
+    任何分叉 = 你的实现有 bug，且失败序列可打印复现。这是 RocksDB <code>db_stress</code> 的核心思想，也是验数据结构最强的可迁移 harness。</p>
+  </div>
+
+  <h3>代码 2 — 模型差分 harness（接 <code>memtable.rs</code> 末尾）</h3>
+  <pre><span class="c">#[cfg(test)]</span>
+<span class="k">mod</span> tests {
+    <span class="k">use</span> super::*;
+    <span class="k">use</span> std::collections::BTreeMap;
+
+    <span class="c">// 无第三方依赖的确定性伪随机（xorshift）——可复现，失败种子能重跑。</span>
+    <span class="k">struct</span> <span class="t">Rng</span>(<span class="t">u64</span>);
+    <span class="k">impl</span> <span class="t">Rng</span> {
+        <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) -> <span class="t">u64</span> {
+            self.0 ^= self.0 &lt;&lt; 13; self.0 ^= self.0 &gt;&gt; 7; self.0 ^= self.0 &lt;&lt; 17; self.0
+        }
+    }
+
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">memtable_matches_btreemap_oracle</span>() {
+        <span class="k">let</span> mt = MemTable::<span class="f">new</span>();
+        <span class="k">let</span> <span class="k">mut</span> model: BTreeMap&lt;Vec&lt;<span class="t">u8</span>&gt;, Vec&lt;<span class="t">u8</span>&gt;&gt; = BTreeMap::<span class="f">new</span>();
+        <span class="k">let</span> <span class="k">mut</span> rng = Rng(<span class="s">0x1234_5678</span>);
+
+        <span class="k">for</span> step <span class="k">in</span> 0..1000 {
+            <span class="k">let</span> k = <span class="f">format!</span>(<span class="s">"k{}"</span>, rng.<span class="f">next</span>() % 50).<span class="f">into_bytes</span>(); <span class="c">// 50 个 key，逼出大量覆盖写</span>
+            <span class="k">if</span> rng.<span class="f">next</span>() % 4 == 0 {
+                <span class="c">// 25% 概率读：两边必须一致</span>
+                <span class="k">let</span> got = mt.<span class="f">get</span>(&k).<span class="f">map</span>(|v| v.to_vec());
+                <span class="f">assert_eq!</span>(got, model.<span class="f">get</span>(&k).<span class="f">cloned</span>(), <span class="s">"第 {} 步分叉, key={:?}"</span>, step, k);
+            } <span class="k">else</span> {
+                <span class="c">// 75% 概率写：两边同样写</span>
+                <span class="k">let</span> v = <span class="f">format!</span>(<span class="s">"v{}"</span>, rng.<span class="f">next</span>()).<span class="f">into_bytes</span>();
+                mt.<span class="f">put</span>(Bytes::<span class="f">from</span>(k.<span class="f">clone</span>()), Bytes::<span class="f">from</span>(v.<span class="f">clone</span>()));
+                model.<span class="f">insert</span>(k, v);
+            }
+        }
+    }
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test memtable</div>
+  <div class="done"><div class="kicker">看到这个就过</div><p style="margin:.3em 0 0"><code>test memtable::tests::memtable_matches_btreemap_oracle ... ok</code></p></div>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">想清楚再进 A3</div>
+    <ol>
+      <li><strong>序从哪来</strong>：A1 写了 <code>Comparator</code> trait，可 <code>SkipMap&lt;Bytes,_&gt;</code> 用的是 <code>Bytes</code> 自身的 <code>Ord</code>。这两个序现在一致（都字节序）所以没事——但如果用户要自定义比较器，<code>SkipMap</code> 接不进去。RocksDB 怎么解决的？（提示：它不直接存 user_key，而是存编码进比较信息的 key。这是 Phase 后期 InternalKey 的伏笔，先记住这个张力。）</li>
+      <li><strong>覆盖写的真相</strong>：<code>map.insert</code> 同 key 直接替换值。但真正的 LSM 不是"原地改"——它是<strong>追加一个新版本</strong>，旧版本仍在更老的 SST 里。MemTable 这层为什么可以"原地覆盖"而整体仍是 append-only？（提示：MemTable 是最新一层。）</li>
+      <li><strong>Delete 去哪了</strong>：现在没有 <code>delete</code>。LSM 怎么删一个 key 而不去翻所有 SST 找到它？（关键词：墓碑 tombstone。这是 MVP 后引入 InternalKey + ValueType 的动机，先想想朴素 <code>map.remove</code> 为什么不够。）</li>
+      <li><strong>并发</strong>：<code>put</code> 签名是 <code>&amp;self</code> 不是 <code>&amp;mut self</code>——多线程能同时写。为什么 <code>SkipMap</code> 能允许这样而 <code>BTreeMap</code> 不行？这对应 RocksDB MemTable 的什么并发模型（learning-record 0006/0007）？</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/wiki/MemTable">RocksDB Wiki: MemTable</a>（跳表 vs 哈希 vs vector 三种实现权衡）·
+       <a href="https://docs.rs/crossbeam-skiplist">crossbeam-skiplist 文档</a> 看 <code>SkipMap::get</code> 的 <code>Borrow</code> 约束。</p>
+    <p><strong>下一步.</strong> <a href="a3-size-freeze.html">A3：让 MemTable 知道自己多大、会喊"我满了"</a>，学第三种 harness：不变量检查。</p>
+    <p>坑没填上、问题没想通，问我。</p>
+  </div>
+</div>
+</body>
+</html>

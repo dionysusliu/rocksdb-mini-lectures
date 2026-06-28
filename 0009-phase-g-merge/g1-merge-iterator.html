@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 · MergeIterator — k 路归并</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../0007-phase-f-iterator/index.html">← Phase F</a> &nbsp;·&nbsp; <a href="index.html">Phase G</a> &nbsp;·&nbsp; G1</div>
+
+  <div class="kicker">STEP G1 · Phase G 归并</div>
+  <h1>MergeIterator — k 路归并</h1>
+  <p>Phase F 把三种数据源(block / SST / memtable)全装成同一个 <code>LsmIterator</code>。零件齐了,现在<strong>组装</strong>:把 N 个各自有序的源,合成<strong>一条全局有序的流</strong>。这就是 LSM 的灵魂——<strong>读时归并(merge-on-read)</strong>:数据散在 active memtable、若干 immutable、一摞 SST 里,谁也不动谁,读的时候按 key 归并、新值盖旧值。本课只做<strong>纯归并</strong>(plain key);快照与墓碑感知留到 H/K。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">新建 <code>merge.rs</code>:<code>MergeIterator&lt;'a&gt;</code> 实现 <code>LsmIterator</code>,内部<strong>只有一个 min-heap</strong>,堆元素 <code>HeapItem</code> <strong>直接拥有迭代器</strong>(<code>Box&lt;dyn LsmIterator + 'a&gt;</code>)+ 优先级 <code>idx</code>。源按<strong>优先级</strong>传入(idx 小 = 高);同 key 多源出现时,只吐最高优先级源的值、其余推进跳过(<strong>源优先级去重</strong>)。<code>lib.rs</code> 加 <code>pub mod merge;</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 归并差分绿——full scan == 按优先级合并后的 <code>BTreeMap</code>;同 key 吐最高优先级值且只一次;<code>seek(t)</code> 跨源落第一个 ≥t;空源集 invalid。<strong>零 key 拷贝</strong>(堆拥有源、比较读活 key)。</p>
+  </div>
+
+  <h3>为什么是「看齐所有头 → 取最小 → 只推一个」(F1 的解耦在这兑现)</h3>
+  <p>k 路归并的核心动作:<strong>看齐 N 个源的当前头 → 比出最小 key → 只推进出最小的那个源</strong>,其余源<strong>纹丝不动、下一轮还要再被看一次</strong>。这正是 F1 反复强调的"<strong>窥视(<code>valid/key/value</code>)与前进(<code>next</code>)解耦</strong>"——语言自带的 <code>Iterator::next()</code> 把"看 + 进"捆死,根本写不出归并;我们的 <code>LsmIterator</code> 把它俩拆开,归并才成立。<strong>这一课是 Phase F 全部铺垫的兑现点。</strong></p>
+  <span class="src">table/merging_iterator.cc — MergingIterator:MinHeap&lt;IteratorWrapper&gt;,Next() 推进堆顶后重排</span>
+
+  <h3>min-heap:堆里存什么?(这次让堆直接<u>拥有</u>源)</h3>
+  <p>"看齐 N 个头取最小"最朴素是每步线性扫 N 个源(O(N))。用 <strong>min-heap</strong> 把每步降到 <strong>O(log N)</strong>:堆顶永远是当前最小。但<strong>堆里存什么</strong>有讲究——三个选项:</p>
+  <ul>
+    <li>❌ 存"指向源的引用"(堆借 <code>sources</code> 兄弟字段)→ <strong>自引用借用</strong>,编译器拒(F3 刚踩过)。</li>
+    <li>🅱️ 存 <strong>(key 的<u>拷贝</u>, idx)</strong>,源另放 <code>sources</code> Vec —— 堆不借源、无自引用,但<strong>每次推进拷一次 key 进堆</strong>(<code>to_vec()</code>)。这是最朴素的破法。</li>
+    <li>✅ <strong>让堆直接<u>拥有</u>迭代器</strong>:堆元素 <code>HeapItem { idx, iter: Box&lt;dyn LsmIterator&gt; }</code> 把源 <code>move</code> 进堆。<strong>没有兄弟字段可借 → 根本不存在自引用;比较时读 <code>iter.key()</code> 的<u>活 key</u> → 零拷贝。</strong>推进靠 <strong>pop 出堆顶 → <code>next()</code> → 压回</strong>。</li>
+  </ul>
+  <p>这是本课相对旧版的关键改动:<strong>struct 从「sources + heap 两字段」塌成「只剩 heap」</strong>。所有权不再分裂,<code>to_vec()</code> 消失。</p>
+  <div class="warnbox"><strong>但"堆独占所有权"逼出两个新约束:</strong><br>
+  ① <strong>自定义 <code>Ord</code> 把大顶堆当小顶用</strong>:std 只有大顶 <code>BinaryHeap</code>,给 <code>HeapItem</code> 写 <code>Ord</code>——主序 <code>key</code> 升、key 同则 <code>idx</code> 升,最后 <code>.reverse()</code> → 最小 (key, idx) 落堆顶。<strong>idx 即优先级,"同 key 谁赢"被堆序顺手解决。</strong><br>
+  ② <strong>失效源必须沉底、绝不丢</strong>:堆是<u>唯一</u>所有者,<code>seek</code> 要重定位<strong>所有</strong>源,所以耗尽的源 <strong>next() 后照样压回</strong>,不能丢(丢了 seek 捞不回)。它没 key,<code>Ord</code> 里用 <code>valid()</code> 分支让它<strong>恒沉堆底</strong>——绝不上顶污染比较。于是 <code>valid()</code> 也得改判「堆顶是否 valid」,而非「堆非空」。</div>
+
+  <div class="warnbox"><strong>源优先级 = plain key 阶段区分新旧的<u>唯一</u>手段。</strong> 同一个 key 写了两次(memtable 新值 + SST 旧值),plain key 字节完全一样、<strong>分不出谁新</strong>。只能靠"<strong>源的排列顺序</strong>"约定:active memtable &gt; immutable &gt; 新 SST &gt; 旧 SST(引擎 <code>get</code> 的 <code>mem → imm → ssts</code> 同序)。所以 <code>idx=0</code>(传入 <code>sources</code> 的第 0 个)必须是最新的源。<strong>Phase H3</strong> 把 seq 编进 key、比较器换成 <code>InternalKeyComparator</code> 后,新旧就由 <strong>seq</strong> 直接定序,不再单靠源顺序——那次"比较器重写"是刻意的教学点。</p>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>新建 <code>merge.rs</code>,定义 <code>HeapItem&lt;'a&gt;</code>(持 <code>idx</code> + <code>iter</code>)及其 <code>Ord</code>(活 key + idx + invalid 沉底),再定义 <code>MergeIterator&lt;'a&gt;</code>(<strong>唯一字段 <code>heap</code></strong>)与 <code>new</code>(「代码 1」)。<code>lib.rs</code> 加 <code>pub mod merge;</code>。</li>
+    <li>实现 <code>LsmIterator</code>:<code>seek*</code> 把全员 <code>drain</code> 出堆、各自 seek、重建堆;<code>next</code> 用 <strong>pop 锚 + 同 key 全推进 + 压回</strong>;<code>key/value/valid</code> 走堆顶(「代码 2」)。</li>
+    <li>敲入「代码 3」归并差分 + 去重 + seek harness,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>HeapItem</code> + <code>Ord</code> + <code>MergeIterator</code> 结构(merge.rs)</h3>
+  <pre>    <span class="k">use</span> std::cmp::Ordering;
+    <span class="k">use</span> std::collections::BinaryHeap;
+    <span class="k">use</span> crate::iterator::LsmIterator;
+
+    <span class="c">// 堆元素:idx(优先级,小=高) + 迭代器本身。堆直接持有源 → struct 无兄弟字段 → 无自引用。</span>
+    <span class="k">struct</span> <span class="t">HeapItem</span>&lt;<span class="k">'a</span>&gt; {
+        idx: usize,
+        iter: Box&lt;<span class="k">dyn</span> LsmIterator + <span class="k">'a</span>&gt;,
+    }
+    <span class="c">// Ord 读"活 key":主序 key 升、key 同则 idx 升,末尾 .reverse() → 喂大顶堆得小顶语义。</span>
+    <span class="c">// invalid 源没 key:用 valid() 分支让它恒"最小",沉到堆底、绝不上顶。seek 还能把它捞回重定位。</span>
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">Ord</span> <span class="k">for</span> <span class="t">HeapItem</span>&lt;<span class="k">'a</span>&gt; {
+        <span class="k">fn</span> <span class="f">cmp</span>(&self, o: &Self) -> Ordering {
+            <span class="k">match</span> (self.iter.<span class="f">valid</span>(), o.iter.<span class="f">valid</span>()) {
+                (<span class="k">true</span>, <span class="k">true</span>)  => self.iter.<span class="f">key</span>().<span class="f">cmp</span>(o.iter.<span class="f">key</span>())
+                                    .<span class="f">then</span>(self.idx.<span class="f">cmp</span>(&o.idx)).<span class="f">reverse</span>(),
+                (<span class="k">true</span>, <span class="k">false</span>) => Ordering::Greater,   <span class="c">// valid 上浮(大顶堆顶)</span>
+                (<span class="k">false</span>, <span class="k">true</span>) => Ordering::Less,
+                (<span class="k">false</span>, <span class="k">false</span>)=> Ordering::Equal,
+            }
+        }
+    }
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">PartialOrd</span> <span class="k">for</span> <span class="t">HeapItem</span>&lt;<span class="k">'a</span>&gt; {
+        <span class="k">fn</span> <span class="f">partial_cmp</span>(&self, o: &Self) -> Option&lt;Ordering&gt; { Some(self.<span class="f">cmp</span>(o)) }
+    }
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">PartialEq</span> <span class="k">for</span> <span class="t">HeapItem</span>&lt;<span class="k">'a</span>&gt; {
+        <span class="k">fn</span> <span class="f">eq</span>(&self, o: &Self) -> bool { self.<span class="f">cmp</span>(o) == Ordering::Equal }
+    }
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">Eq</span> <span class="k">for</span> <span class="t">HeapItem</span>&lt;<span class="k">'a</span>&gt; {}
+
+    <span class="k">pub struct</span> <span class="t">MergeIterator</span>&lt;<span class="k">'a</span>&gt; {
+        heap: BinaryHeap&lt;HeapItem&lt;<span class="k">'a</span>&gt;&gt;,   <span class="c">// 唯一字段:堆拥有全部源(含已耗尽的,沉底待 seek 复用)</span>
+    }
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">MergeIterator</span>&lt;<span class="k">'a</span>&gt; {
+        <span class="c">/// sources 按优先级降序:第 0 个最高(同 key 时它赢)。idx 即优先级。</span>
+        <span class="k">pub fn</span> <span class="f">new</span>(sources: Vec&lt;Box&lt;<span class="k">dyn</span> LsmIterator + <span class="k">'a</span>&gt;&gt;) -> Self {
+            <span class="k">let</span> heap = sources.<span class="f">into_iter</span>().<span class="f">enumerate</span>()
+                .<span class="f">map</span>(|(idx, iter)| HeapItem { idx, iter })
+                .<span class="f">collect</span>();                   <span class="c">// collect 进 BinaryHeap 即建堆</span>
+            Self { heap }
+        }
+    }</pre>
+
+  <h3>代码 2 — 实现 <code>LsmIterator</code>(merge.rs)</h3>
+  <pre>    <span class="k">impl</span> <span class="t">LsmIterator</span> <span class="k">for</span> <span class="t">MergeIterator</span>&lt;<span class="k">'_</span>&gt; {
+        <span class="k">fn</span> <span class="f">seek_to_first</span>(&<span class="k">mut</span> self) {
+            <span class="c">// 堆是唯一所有者:全员 drain 出来 → 各自 seek → 重建堆(Ord 按新位置重排)。</span>
+            <span class="k">let</span> <span class="k">mut</span> items: Vec&lt;_&gt; = self.heap.<span class="f">drain</span>().<span class="f">collect</span>();
+            <span class="k">for</span> it <span class="k">in</span> &<span class="k">mut</span> items { it.iter.<span class="f">seek_to_first</span>(); }
+            self.heap = items.<span class="f">into_iter</span>().<span class="f">collect</span>();
+        }
+        <span class="k">fn</span> <span class="f">seek</span>(&<span class="k">mut</span> self, target: &[u8]) {
+            <span class="k">let</span> <span class="k">mut</span> items: Vec&lt;_&gt; = self.heap.<span class="f">drain</span>().<span class="f">collect</span>();
+            <span class="k">for</span> it <span class="k">in</span> &<span class="k">mut</span> items { it.iter.<span class="f">seek</span>(target); }
+            self.heap = items.<span class="f">into_iter</span>().<span class="f">collect</span>();
+        }
+        <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) {
+            <span class="c">// 弹出胜者但先不推进 —— 它当"活参照锚",免去 cur 的 to_vec()。</span>
+            <span class="k">let</span> <span class="k">mut</span> top = <span class="k">match</span> self.heap.<span class="f">pop</span>() {
+                Some(t) <span class="k">if</span> t.iter.<span class="f">valid</span>() => t,
+                other => { <span class="k">if let</span> Some(t) = other { self.heap.<span class="f">push</span>(t); } <span class="k">return</span>; }
+            };
+            <span class="c">// 推进所有"== 锚 key"的低优先级源(被遮蔽的旧值),否则下一轮重复冒出。</span>
+            <span class="k">loop</span> {
+                <span class="k">let</span> same = <span class="k">match</span> self.heap.<span class="f">peek</span>() {
+                    Some(p) => p.iter.<span class="f">valid</span>() && p.iter.<span class="f">key</span>() == top.iter.<span class="f">key</span>(),
+                    None => <span class="k">false</span>,
+                };
+                <span class="k">if</span> !same { <span class="k">break</span>; }
+                <span class="k">let</span> <span class="k">mut</span> loser = self.heap.<span class="f">pop</span>().<span class="f">unwrap</span>();
+                loser.iter.<span class="f">next</span>();
+                self.heap.<span class="f">push</span>(loser);          <span class="c">// 失效也压回:Ord 让它沉底,供后续 seek 复用</span>
+            }
+            top.iter.<span class="f">next</span>();
+            self.heap.<span class="f">push</span>(top);                <span class="c">// 锚最后推进、压回</span>
+        }
+        <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool {
+            self.heap.<span class="f">peek</span>().<span class="f">map_or</span>(<span class="k">false</span>, |h| h.iter.<span class="f">valid</span>())   <span class="c">// 非空≠有效:全沉底也算 invalid</span>
+        }
+        <span class="k">fn</span> <span class="f">key</span>(&self)   -> &[u8] { self.heap.<span class="f">peek</span>().<span class="f">unwrap</span>().iter.<span class="f">key</span>() }
+        <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8] { self.heap.<span class="f">peek</span>().<span class="f">unwrap</span>().iter.<span class="f">value</span>() }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>key()/value()</code> 走 <code>heap.peek()</code> 取堆顶迭代器的<strong>活值</strong>,零拷贝。<code>next</code> 里 <code>top</code> 一旦 <code>pop</code> 出堆就<strong>不再借 heap</strong>,所以循环中能自由 <code>pop/push</code> 改堆;且 <code>top</code> <strong>全程持有、最后才推进</strong> → <code>top.iter.key()</code> 始终是合法参照,<strong>连旧版那次 <code>cur.clone()</code> 都省了</strong>。<code>same</code> 用 <code>match</code> 算出布尔后 <code>peek</code> 的借用立即结束(NLL),才轮到 <code>pop</code>——避开"持 peek 借用又改堆"的冲突。</p>
+
+  <div class="warnbox"><strong>去重的关键:<code>next</code> 要推进<u>所有</u>同 key 源,不只堆顶。</strong> 若只推堆顶(胜者),同 key 的低优先级旧值还赖在堆里,下一轮就会作为"新的最小"被吐出来——<strong>同一个逻辑 key 吐两次</strong>。所以 <code>while heap.peek().key == cur</code> 把它们全 pop+推进+回填。这正是"覆盖写的旧值被新值<strong>遮蔽</strong>"在归并层的实现。</p>
+
+  <h2>🧰 Coding style:堆直接拥有源 · 自定义 Ord(活 key + invalid 沉底)· pop+push 而非 peek_mut</h2>
+  <ul>
+    <li><strong>让排序结构直接<u>拥有</u>元素 —— 破自引用第四招</strong>:前三招都在"不让排序结构碰所有权"(F1 <code>Arc&lt;Block&gt;</code> 引用计数、F3 借外部 map、旧版"存副本")。这里反过来:把迭代器 <code>move</code> 进 <code>HeapItem</code>,堆就是源的<strong>唯一所有者</strong>——没有兄弟字段可借,自引用从根上不存在,<code>to_vec()</code> 也随之消失。<strong>Rust 破自引用全集:借外部 / 引用计数 / 存副本 / 直接拥有。</strong></li>
+    <li><strong>自定义 <code>Ord</code> 把大顶堆当小顶 + invalid 沉底</strong>:std 只有大顶 <code>BinaryHeap</code>;给 <code>HeapItem</code> 写 <code>Ord</code>,主序 <code>key</code>、次序 <code>idx</code>、末尾 <code>.reverse()</code> → 小顶语义,"同 key 谁赢"顺手解决。额外一笔:invalid 源没 key,用 <code>valid()</code> 分支让它<strong>恒沉底</strong>——这是"堆独占所有权"的必然代价(耗尽的源不能丢,得留着给 <code>seek</code> 捞回)。</li>
+    <li><strong><code>pop+push</code> 而非 <code>peek_mut</code></strong>:弹出胜者→推进→压回。比 <code>peek_mut</code> 多一次 sift(可忽略),但躲掉 <code>PeekMut</code> 的 <strong>Drop-resift 访问失效迭代器</strong>的坑(skyzh 文档专门警告"别在 <code>PeekMut</code> 作用域里用 <code>?</code>")。所有权故事更直白:弹出后 <code>top</code> 不借堆,改堆随意。</li>
+    <li><strong>idx 即优先级</strong>:不另存优先级字段,<code>HeapItem.idx</code>(传入顺序)直接承载;<code>Ord</code> 的次序把"同 key 选最高优先级"编进堆序,<code>next</code> 只管"推进所有同 key 源"。<strong>把约定编进数据布局,省掉一段判断逻辑。</strong></li>
+  </ul>
+
+  <h3>免这次 copy:三种真实做法对照</h3>
+  <table>
+    <thead><tr><th>系统</th><th>堆里放什么</th><th>key 副本</th><th>比较代价</th></tr></thead>
+    <tbody>
+      <tr><td><strong>本课(dyn)</strong></td><td><code>HeapItem</code> 拥有 <code>Box&lt;dyn&gt;</code>,Ord 读活 key</td><td><strong>零</strong></td><td>每次比较走 <strong>vtable</strong>(O(log N)/步)</td></tr>
+      <tr><td><strong>RocksDB</strong></td><td><code>HeapItem*</code> 指针,比较器 deref 活 key</td><td>每个子迭代器缓存 <strong>1 份</strong>(<code>IteratorWrapper</code>,每 advance 刷新)</td><td>读连续内存,<strong>免 vtable</strong> + cache 友好</td></tr>
+      <tr><td><strong>skyzh</strong></td><td>泛型 <code>HeapWrapper&lt;I&gt;</code> 拥有迭代器</td><td><strong>零</strong></td><td>单态化 <strong>inline</strong>,无 vtable</td></tr>
+    </tbody>
+  </table>
+  <p><strong>反直觉点:在 <code>dyn</code> 下"免 copy"不是纯赚。</strong>copy 没了,但每次比较多一次 vtable 调 <code>key()</code>。RocksDB 实测后<strong>故意把 copy 当缓存请回来</strong>——每个子迭代器存一份 key(注意:是 <u>per-child</u>、每 advance 刷新一次,不是 per-heap-node),为的是免 vtable + cache 局部性。<strong>真正的零 copy 要靠静态分发</strong>(skyzh 的泛型塔,单态化让 <code>key()</code> inline)——那是 Phase F→G 的大重构,本课用 <code>Box&lt;dyn&gt;</code> 拿"零 copy + 一点 vtable"的折中,N=几层时 vtable 可忽略。</p>
+
+  <h2>🧠 System mindset:读时归并 = LSM 的灵魂 · k 路归并无处不在</h2>
+  <p>LSM 树的核心权衡:<strong>写时只追加(快),读时才归并(把代价后移)</strong>。数据按时间分层散落(memtable→L0→L1…),从不原地改;读一个范围 = 把所有层的有序片段<strong>归并成一条逻辑流</strong>,新值遮旧值。<code>MergeIterator</code> 就是这台归并机。它和一大票系统同构:</p>
+  <table>
+    <thead><tr><th>领域</th><th>k 路归并长这样</th></tr></thead>
+    <tbody>
+      <tr><td><strong>外部排序</strong></td><td>数据大于内存 → 切成有序 run 落盘 → <strong>k 路归并</strong>成最终序。归并排序的 merge 步就是 2 路特例。</td></tr>
+      <tr><td><strong>MapReduce / Spark</strong></td><td>shuffle 后每个 reducer 把多个 mapper 的有序分片<strong>归并</strong>成一条 key 有序流再 reduce。</td></tr>
+      <tr><td><strong>日志/时序系统</strong></td><td>多个有序日志段(按时间)归并成全局时间线;Kafka compaction、Prometheus TSDB block merge 同理。</td></tr>
+      <tr><td><strong>LSM(本课 ★)</strong></td><td>读时归并 active+imm+SST;<strong>compaction</strong>(Phase O)也是归并——只是它把结果<strong>写回盘</strong>、顺手丢被遮蔽/墓碑数据。</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:只要你有"<strong>多个各自有序的源,要合成一条全局有序流</strong>",答案几乎总是 min-heap k 路归并:堆顶取最小、推进它、回填。难点从来不在堆,而在<strong>同 key 怎么定胜负</strong>——本课用源优先级,数据库用版本号(seq/MVCC),CRDT 用因果序。<strong>"归并"解决顺序,"优先级/版本"解决冲突</strong>,两件事要分开想。</p>
+
+  <h2>🧪 Harness 系统:归并差分 vs 合并后的 BTreeMap(Tier 2 核心回归门)</h2>
+  <div class="harness">
+    <div class="kicker">为什么用 BTreeMap 当 oracle</div>
+    <p style="margin:.3em 0 0">归并的正确性 = "<strong>full scan 吐出的序列,等于把所有源按优先级合并进一个 <code>BTreeMap</code> 后的有序遍历</strong>"。oracle 怎么建:按优先级<strong>从高到低</strong>把每个源灌进 <code>BTreeMap</code>,<code>entry().or_insert()</code>——<strong>已存在就不覆盖</strong>(高优先级先写、占坑),完美复刻"源优先级去重"。<code>BTreeMap</code> 显然正确、有序,拿它差分能抓:漏 key、重复 key(去重没推全)、错序(堆比较错)、选错胜者(优先级反了)。这条差分到 Phase O(compaction)、Phase K(对外 scan)会一路复用,是 <strong>Tier 2 最核心的回归门</strong>。</p>
+  </div>
+
+  <h3>代码 3 — harness(merge.rs tests)</h3>
+  <pre>    <span class="c">// 测试用:有序 Vec 上的 LsmIterator(隔离归并逻辑,不牵扯 memtable/SST 生命周期)。</span>
+    <span class="k">struct</span> <span class="t">VecIter</span> { data: Vec&lt;(Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt;, idx: usize }
+    <span class="k">impl</span> <span class="t">VecIter</span> {
+        <span class="k">fn</span> <span class="f">boxed</span>(pairs: &[(&str, &str)]) -> Box&lt;<span class="k">dyn</span> LsmIterator&gt; {
+            <span class="k">let</span> <span class="k">mut</span> data: Vec&lt;_&gt; = pairs.<span class="f">iter</span>()
+                .<span class="f">map</span>(|(k,v)| (k.<span class="f">as_bytes</span>().<span class="f">to_vec</span>(), v.<span class="f">as_bytes</span>().<span class="f">to_vec</span>())).<span class="f">collect</span>();
+            data.<span class="f">sort</span>();
+            Box::<span class="f">new</span>(VecIter { data, idx: 0 })
+        }
+    }
+    <span class="k">impl</span> <span class="t">LsmIterator</span> <span class="k">for</span> <span class="t">VecIter</span> {
+        <span class="k">fn</span> <span class="f">seek_to_first</span>(&<span class="k">mut</span> self) { self.idx = 0; }
+        <span class="k">fn</span> <span class="f">seek</span>(&<span class="k">mut</span> self, t: &[u8]) { self.idx = self.data.<span class="f">partition_point</span>(|(k,_)| k.<span class="f">as_slice</span>() &lt; t); }
+        <span class="k">fn</span> <span class="f">next</span>(&<span class="k">mut</span> self) { self.idx += 1; }
+        <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool { self.idx &lt; self.data.<span class="f">len</span>() }
+        <span class="k">fn</span> <span class="f">key</span>(&self) -> &[u8] { &self.data[self.idx].0 }
+        <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8] { &self.data[self.idx].1 }
+    }
+
+    <span class="c">// oracle:按优先级把源灌进 BTreeMap,低 idx 先写、or_insert 不覆盖(高优先级赢)。</span>
+    <span class="k">fn</span> <span class="f">oracle</span>(sources: &[&[(&str, &str)]]) -> Vec&lt;(Vec&lt;u8&gt;, Vec&lt;u8&gt;)&gt; {
+        <span class="k">let</span> <span class="k">mut</span> m = BTreeMap::<span class="f">new</span>();
+        <span class="k">for</span> src <span class="k">in</span> sources {
+            <span class="k">for</span> (k, v) <span class="k">in</span> *src {
+                m.<span class="f">entry</span>(k.<span class="f">as_bytes</span>().<span class="f">to_vec</span>()).<span class="f">or_insert_with</span>(|| v.<span class="f">as_bytes</span>().<span class="f">to_vec</span>());
+            }
+        }
+        m.<span class="f">into_iter</span>().<span class="f">collect</span>()
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 归并差分:full scan == 按优先级合并后的 BTreeMap</span>
+    <span class="k">fn</span> <span class="f">merge_full_scan_matches_oracle</span>() {
+        <span class="k">let</span> s0: &[(&str,&str)] = &[(<span class="s">"k01"</span>,<span class="s">"a1"</span>),(<span class="s">"k03"</span>,<span class="s">"a3"</span>),(<span class="s">"k05"</span>,<span class="s">"a5"</span>)];
+        <span class="k">let</span> s1: &[(&str,&str)] = &[(<span class="s">"k02"</span>,<span class="s">"b2"</span>),(<span class="s">"k03"</span>,<span class="s">"b3"</span>),(<span class="s">"k06"</span>,<span class="s">"b6"</span>)]; <span class="c">// k03 撞 s0</span>
+        <span class="k">let</span> s2: &[(&str,&str)] = &[(<span class="s">"k00"</span>,<span class="s">"c0"</span>),(<span class="s">"k05"</span>,<span class="s">"c5"</span>),(<span class="s">"k07"</span>,<span class="s">"c7"</span>)]; <span class="c">// k05 撞 s0</span>
+        <span class="k">let</span> <span class="k">mut</span> it = MergeIterator::<span class="f">new</span>(vec![VecIter::<span class="f">boxed</span>(s0), VecIter::<span class="f">boxed</span>(s1), VecIter::<span class="f">boxed</span>(s2)]);
+        it.<span class="f">seek_to_first</span>();
+        <span class="f">assert_eq!</span>(<span class="f">collect</span>(&<span class="k">mut</span> it), <span class="f">oracle</span>(&[s0, s1, s2]));
+    }
+
+    <span class="c">#[test]</span> <span class="c">// 源优先级:k03 在 s0/s1 都有 → 吐 s0 的 WIN,只一次</span>
+    <span class="k">fn</span> <span class="f">source_priority_wins_and_dedups</span>() {
+        <span class="k">let</span> s0: &[(&str,&str)] = &[(<span class="s">"k03"</span>,<span class="s">"WIN"</span>)];
+        <span class="k">let</span> s1: &[(&str,&str)] = &[(<span class="s">"k03"</span>,<span class="s">"lose"</span>),(<span class="s">"k04"</span>,<span class="s">"b4"</span>)];
+        <span class="k">let</span> <span class="k">mut</span> it = MergeIterator::<span class="f">new</span>(vec![VecIter::<span class="f">boxed</span>(s0), VecIter::<span class="f">boxed</span>(s1)]);
+        it.<span class="f">seek_to_first</span>();
+        <span class="f">assert_eq!</span>(<span class="f">collect</span>(&<span class="k">mut</span> it),
+            vec![(b<span class="s">"k03"</span>.<span class="f">to_vec</span>(), b<span class="s">"WIN"</span>.<span class="f">to_vec</span>()), (b<span class="s">"k04"</span>.<span class="f">to_vec</span>(), b<span class="s">"b4"</span>.<span class="f">to_vec</span>())]);
+    }
+
+    <span class="c">#[test]</span> <span class="c">// seek 跨源:命中 / 缝隙 / 超界</span>
+    <span class="k">fn</span> <span class="f">merge_seek_lower_bound_across_sources</span>() {
+        <span class="k">let</span> s0: &[(&str,&str)] = &[(<span class="s">"k01"</span>,<span class="s">"a1"</span>),(<span class="s">"k04"</span>,<span class="s">"a4"</span>)];
+        <span class="k">let</span> s1: &[(&str,&str)] = &[(<span class="s">"k02"</span>,<span class="s">"b2"</span>),(<span class="s">"k05"</span>,<span class="s">"b5"</span>)];
+        <span class="k">let</span> <span class="k">mut</span> it = MergeIterator::<span class="f">new</span>(vec![VecIter::<span class="f">boxed</span>(s0), VecIter::<span class="f">boxed</span>(s1)]);
+        it.<span class="f">seek</span>(b<span class="s">"k02"</span>); <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k02"</span>);   <span class="c">// 命中(s1)</span>
+        it.<span class="f">seek</span>(b<span class="s">"k03"</span>); <span class="f">assert_eq!</span>(it.<span class="f">key</span>(), b<span class="s">"k04"</span>);   <span class="c">// 缝隙 → 下一个(s0)</span>
+        it.<span class="f">seek</span>(b<span class="s">"k99"</span>); <span class="f">assert!</span>(!it.<span class="f">valid</span>());          <span class="c">// 超界</span>
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>collect</code> 是个两行小工具(<code>while valid { push(key,value); next }</code>)。另建议补两个退化用例:空源集、三源同 key(见 reference 的 <code>merge_empty_sources</code> / <code>three_sources_same_key_dedup</code>)。</p>
+
+  <div class="cmd">cd rocksdb-mini && cargo test merge</div>
+  <div class="done"><div class="kicker">G1 判定 — 全绿</div><p style="margin:.3em 0 0"><code>merge::tests::merge_full_scan_matches_oracle ... ok</code><br><code>merge::tests::source_priority_wins_and_dedups ... ok</code><br><code>merge::tests::merge_seek_lower_bound_across_sources ... ok</code><br>+ 空源 / 三源同 key 退化用例<br>(F 的 block/sst/memtable iterator 测试照旧全过)</p></div>
+
+  <div class="milestone">🏁 <strong>G1 达成:有了归并机</strong>。但它现在只认 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code> —— 还没接上引擎真实的 active/imm/SST。<strong>G2</strong> 把引擎的三层源喂进来,切一片对外的 <code>scan(start..end)</code>(minimal,plain key),作为 Phase G 的里程碑。</div>
+
+  <h2>🔄 CI/CD:归并差分进 integration 档,作核心回归门</h2>
+  <p>G1 的 VecIter 测试纯内存、秒级 → <code>test</code> 快档。但 G2 起,scan 要跨真实 memtable + 临时 SST(碰盘),归并差分升级成"引擎级"——进 <code>integration</code> 慢档。这条"<strong>归并结果 == 合并后 BTreeMap</strong>"是 Tier 2 最该守的不变量:任何改动(新加一层、换比较器、compaction 重写)只要让它红,就是动了读路径语义。<strong>H3 换 InternalKeyComparator、Phase O 写 compaction 时,这条差分是你的安全网。</strong></p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">G1 想透这几个</div>
+    <ol>
+      <li><strong>为什么 <code>next</code> 要推进所有同 key 源,不只堆顶?</strong>(若只推堆顶胜者,同 key 的低优先级旧值还在堆里 → 下一轮作为"新最小"被吐 → 同一逻辑 key 吐两次。去重的本质 = 把被遮蔽的旧值<strong>一并跳过</strong>。)</li>
+      <li><strong>堆为什么<u>直接拥有</u>迭代器,而不是"存 key 副本 + sources Vec"?代价又是什么?</strong>(让 <code>HeapItem</code> <code>move</code>-own 迭代器,堆成唯一所有者 → 无兄弟字段可借 → 自引用从根上消失、<code>to_vec()</code> 也消失。这是破自引用第四招"直接拥有"(前三招:F1 <code>Arc</code>、F3 借外部 map、旧版存副本)。代价两笔:① 失效源不能丢,得靠 <code>Ord</code> 让它<strong>沉底</strong>留给 <code>seek</code> 复用;② 每次比较走 <strong>vtable</strong> 调 <code>key()</code>。后者正是 RocksDB 宁可<strong>给每个子迭代器缓存一份 key</strong>(<code>IteratorWrapper</code>,per-child、每 advance 刷新)来免掉的——所以"免 copy"在 dyn 下是拿 copy 换了 vtable;真零 copy 要静态分发,如 skyzh 的泛型塔。)</li>
+      <li><strong>plain key 阶段,凭什么断定"第 0 个源(idx=0)的值更新"?</strong>(断不出来——plain key 字节一样、无新旧信息。只能靠<strong>调用方按约定排好源顺序</strong>(引擎的 mem→imm→ssts)。这是个<strong>脆弱的外部约定</strong>:排错了就读到旧值。Phase H3 把 seq 编进 key,新旧变成 key 自带的、比较器能读的信息,约定就<strong>长进数据里</strong>、不再靠调用方自觉。想清楚:这正是 A1 埋下的"plain key 不够"张力的兑现。)</li>
+      <li><strong>heap vs 线性扫,差在哪?</strong>(线性扫每步 O(N) 找最小;堆每步 O(log N)。N 小(几层)时绝对差距小,但 compaction 归并几十上百个 SST 时堆才显威。我们选堆是<strong>为贴 RocksDB 且让 Phase O 直接复用</strong>。反过来想:堆的代价是每步 O(log N) 次 <code>Ord</code> 比较(本课每次还是一次 vtable <code>key()</code>)+ pop/push 维护——N 极小时,线性扫可能<strong>更快</strong>(无堆维护、cache 友好)。<strong>没有绝对优解,看 N 的规模</strong>。)</li>
+      <li><strong>失效的源为什么不能直接丢、要沉底?</strong>(堆是源的<u>唯一</u>所有者,而 <code>seek</code>/<code>seek_to_first</code> 要重定位<strong>所有</strong>源。若 <code>next</code> 把耗尽的源丢出堆,后续 <code>seek</code> 就再也捞不回它 → 漏源。所以失效也 <code>push</code> 回,靠 <code>Ord</code> 的 <code>valid()</code> 分支让它沉到堆底、绝不上顶污染比较。这也逼着 <code>valid()</code> 改判"堆顶是否 valid"而非"堆是否非空"。)</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:G2 — minimal scan(start..end).</strong> 把引擎的 <code>mem</code> / <code>imm[..]</code> / <code>ssts[..]</code> 各做一个 <code>LsmIterator</code>,<strong>按优先级</strong>塞进 <code>MergeIterator</code>,<code>seek(start)</code> 起、吐到 <code>key &gt;= end</code> 止——这就是对外的范围扫描雏形(plain key)。harness:<code>engine.scan(a..b)</code> == <code>BTreeMap::range(a..b)</code>。<strong>真正的快照/墓碑感知 scan 留到 H/K。</strong></p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/merging_iterator.cc">merging_iterator.cc</a>(MinHeap 归并 N 个 child)· <a href="https://github.com/facebook/rocksdb/blob/main/db/db_iter.cc">db_iter.cc</a>(G2/K 的对外 DBIter 雏形)。</p>
+    <p>想完跟我对答案,或说"继续 G2"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

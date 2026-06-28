@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F2 · SstIter — 跨块惰性扫描</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}.add{color:#a8c98a}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:12px 18px;border-radius:4px;margin:1.2em 0}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="f1-block-iterator.html">← F1</a> &nbsp;·&nbsp; <a href="index.html">Phase F</a> &nbsp;·&nbsp; F2</div>
+
+  <div class="kicker">STEP F2 · Phase F 迭代器</div>
+  <h1>SstIter — 跨块惰性扫描</h1>
+  <p>F1 的 <code>BlockIter</code> 只在一个 block 内走。一个 SST 是<strong>多块 + 一张稀疏索引</strong>。<code>SstIter</code> 是<strong>两级游标</strong>:外层用稀疏索引在块之间定位/跨越,内层用 <code>BlockIter</code> 在块内走。关键是<strong>惰性</strong>——扫到哪一块,才 <code>read_block</code> 哪一块;绝不把整个文件载进来。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0"><code>sst.rs</code> 加 <code>SstIter&lt;'a&gt;</code>(借 <code>&amp;SstReader</code>):<code>seek</code> 用稀疏索引 <code>partition_point</code> 定位候选块 + 块内 <code>seek</code>;<code>next</code> 走到块尾自动 <code>read_block</code> 下一块;<code>SstReader::iter</code> 工厂方法。实现 <code>LsmIterator</code>。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 扫描差分(从任意 seek 点起 == <code>BTreeMap::range</code>)、跨块边界(全量扫 200 条穿过所有接缝不漏不重)、惰性读放大(seek 只读 1 块、全扫恰好读 <code>num_blocks</code> 块)全绿。</p>
+  </div>
+
+  <h3>核心性质:稀疏索引 lower_bound 选出的候选块,<strong>必含</strong>第一个 ≥target</h3>
+  <p>稀疏索引每项 = <code>(该块的<strong>末</strong>键, BlockHandle)</code>。<code>seek(target)</code> 在索引上 <code>partition_point(|last| last &lt; target)</code> 得到第一个 <strong>末键 ≥ target</strong> 的块 <code>i</code>。这块的末键既然 ≥ target,<strong>块内必然存在 ≥ target 的 entry</strong>(末键本身就是)。所以在第 <code>i</code> 块内做 <code>BlockIter::seek(target)</code> <strong>一定 valid</strong>——<strong><code>seek</code> 永远不需要"块内没找到、再跨到下一块"的修正逻辑</strong>。唯一的"无块可选"是 <code>i == 索引长度</code>(target 比所有块的末键都大)→ 直接 invalid。</p>
+  <div class="warnbox"><strong>这条性质把 <code>seek</code> 和 <code>next</code> 的复杂度分得干干净净.</strong> <code>seek</code>:一次索引二分 + 一次块内二分,<strong>无跨块</strong>。<code>next</code>:块内 +1,<strong>仅当</strong>越过块尾才跨到下一块的开头。两个动作各管一段,互不渗透——这正是"<strong>把不变量(末键≥target ⇒ 块内有解)前移到数据布局里</strong>"换来的代码简洁,和 D1/E2 一脉相承。</div>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li><code>sst.rs</code> 定义 <code>SstIter&lt;'a&gt;</code> + <code>load</code> 私有助手(「代码 1」)。</li>
+    <li>实现 <code>LsmIterator</code>:<code>seek_to_first/seek/next/valid/key/value</code>;加 <code>SstReader::iter</code> 工厂(「代码 2」)。</li>
+    <li>敲入「代码 3」差分 + 跨块 + 惰性三组 harness,<code>cargo test</code> 全绿。</li>
+  </ol>
+
+  <h3>代码 1 — <code>SstIter</code> 结构 + <code>load</code></h3>
+  <pre>    <span class="k">use</span> crate::block::BlockIter;
+    <span class="k">use</span> crate::iterator::LsmIterator;
+
+    <span class="k">pub struct</span> <span class="t">SstIter</span>&lt;<span class="k">'a</span>&gt; {
+        reader: &<span class="k">'a</span> SstReader,    <span class="c">// 借读者:按需 read_block + 看 index</span>
+        blk: usize,              <span class="c">// 当前在第几个稀疏索引块</span>
+        cur: Option&lt;BlockIter&gt;,  <span class="c">// 当前块的内层游标;None = invalid</span>
+    }
+
+    <span class="k">impl</span>&lt;<span class="k">'a</span>&gt; <span class="t">SstIter</span>&lt;<span class="k">'a</span>&gt; {
+        <span class="c">/// 载入第 i 块为当前块(越界则置空)。这是唯一摸盘的地方 → 惰性的闸口。</span>
+        <span class="k">fn</span> <span class="f">load</span>(&mut self, i: usize) {
+            <span class="k">if</span> i &gt;= self.reader.index.<span class="f">len</span>() { self.cur = None; <span class="k">return</span>; }
+            <span class="k">let</span> h = self.reader.index[i].1;
+            <span class="k">let</span> block = self.reader.<span class="f">read_block</span>(h).<span class="f">expect</span>(<span class="s">"read_block"</span>); <span class="c">// MVP:IO 错即 panic(见核心问题)</span>
+            self.blk = i;
+            self.cur = Some(BlockIter::<span class="f">new</span>(Arc::<span class="f">new</span>(block)));   <span class="c">// BlockIter 持 Arc&lt;Block&gt;(F1);此处包一层</span>
+        }
+    }</pre>
+  <p style="font-size:.92em;color:var(--soft)"><code>read_block</code> 是 E2 已有的私有方法(<code>read_exact_at</code> + <code>blocks_read.fetch_add(1)</code> + <code>Block::decode</code>),现返回 <code>Block</code>。<code>BlockIter::new</code> 吃 <code>Arc&lt;Block&gt;</code>(F1 定的,块要可共享),所以这里 <code>Arc::new(block)</code> 包一层。<strong>到 Phase S(block cache)<code>read_block</code> 会改成返回 <code>Arc&lt;Block&gt;</code>,届时这层 <code>Arc::new</code> 直接去掉——缓存命中递来的就是现成的 <code>Arc</code></strong>。<code>SstIter</code> 与它同在 <code>sst.rs</code>,可直接用私有字段 <code>index</code> / 方法 <code>read_block</code>——<strong>模块边界即封装边界</strong>。<span style="color:var(--soft)">(顶部记得 <code>use std::sync::Arc;</code>)</span></p>
+
+  <h3>代码 2 — 实现 <code>LsmIterator</code> + <code>iter</code> 工厂</h3>
+  <pre>    <span class="k">impl</span> <span class="t">LsmIterator</span> <span class="k">for</span> <span class="t">SstIter</span>&lt;<span class="k">'_</span>&gt; {
+        <span class="k">fn</span> <span class="f">seek_to_first</span>(&mut self) {
+            self.<span class="f">load</span>(0);
+            <span class="k">if</span> <span class="k">let</span> Some(c) = &mut self.cur { c.<span class="f">seek_to_first</span>(); }
+        }
+        <span class="k">fn</span> <span class="f">seek</span>(&mut self, target: &[u8]) {
+            <span class="c">// 稀疏索引 lower_bound:第一个 末键 &gt;= target 的块</span>
+            <span class="k">let</span> i = self.reader.index.<span class="f">partition_point</span>(|(last, _)| last.<span class="f">as_ref</span>() &lt; target);
+            self.<span class="f">load</span>(i);
+            <span class="k">if</span> <span class="k">let</span> Some(c) = &mut self.cur { c.<span class="f">seek</span>(target); } <span class="c">// 候选块必含解 → 不需跨块</span>
+        }
+        <span class="k">fn</span> <span class="f">next</span>(&mut self) {
+            <span class="k">let</span> Some(c) = &mut self.cur <span class="k">else</span> { <span class="k">return</span>; };
+            c.<span class="f">next</span>();
+            <span class="k">if</span> !c.<span class="f">valid</span>() {                    <span class="c">// 当前块走完 → 跨下一块的开头</span>
+                <span class="k">let</span> nxt = self.blk + 1;
+                self.<span class="f">load</span>(nxt);
+                <span class="k">if</span> <span class="k">let</span> Some(c2) = &mut self.cur { c2.<span class="f">seek_to_first</span>(); }
+            }
+        }
+        <span class="k">fn</span> <span class="f">valid</span>(&self) -> bool { self.cur.<span class="f">as_ref</span>().<span class="f">map_or</span>(false, |c| c.<span class="f">valid</span>()) }
+        <span class="k">fn</span> <span class="f">key</span>(&self)   -> &[u8] { self.cur.<span class="f">as_ref</span>().<span class="f">unwrap</span>().<span class="f">key</span>() }
+        <span class="k">fn</span> <span class="f">value</span>(&self) -> &[u8] { self.cur.<span class="f">as_ref</span>().<span class="f">unwrap</span>().<span class="f">value</span>() }
+    }
+
+    <span class="k">impl</span> <span class="t">SstReader</span> {
+        <span class="c">/// 造一个借本 reader 的扫描游标。</span>
+        <span class="k">pub fn</span> <span class="f">iter</span>(&self) -> SstIter&lt;<span class="k">'_</span>&gt; { SstIter { reader: self, blk: 0, cur: None } }
+    }</pre>
+
+  <div class="warnbox"><strong>为什么 <code>next</code> 跨块后要 <code>seek_to_first</code>.</strong> <code>load(nxt)</code> 新建的 <code>BlockIter</code> 的 <code>new</code> 已 <code>off=0</code> 重建好首条,理论上已在开头——但显式 <code>seek_to_first</code> 让"跨块后落在新块第一个 entry"这个意图<strong>写在脸上</strong>,不依赖 <code>new</code> 的默认值。块都非空(<code>flush_block</code> 只在非空时封口),所以跨过去必 valid,不会"空块导致提前结束"。</div>
+
+  <h2>🧰 Coding style:两级游标 · 惰性闸口集中 · let-else 收窄</h2>
+  <ul>
+    <li><strong>两级迭代器</strong>:外层(索引/块间)+ 内层(<code>BlockIter</code>/块内)。每层只管自己那段,<code>next</code> 的跨块是唯一的层间衔接点。对标 RocksDB <code>BlockBasedTableIterator</code> 正是"index_iter_ + data block iter"两级。<strong>分层迭代</strong>让"块内逻辑"与"块间逻辑"各自可独立测试、独立替换(比如换索引格式不动块内)。</li>
+    <li><strong>惰性只有一个闸口</strong>:所有摸盘都过 <code>load</code> 一处。要加 prefetch、block cache(Phase S)、读计数,都只改这一个函数——<strong>把"副作用集中到单点"</strong>是可观测、可优化的前提。</li>
+    <li><strong><code>let Some(c) = &amp;mut self.cur else { return };</code></strong>:let-else 把"无效就早退"压成一行,主逻辑不再多一层缩进。这是 Rust 处理"提前返回 + 解包"的惯用法。</li>
+  </ul>
+
+  <h2>🧠 System mindset:火山模型 · 惰性 IO · 错误通道的取舍</h2>
+  <p>SstIter 是<strong>火山模型(Volcano / iterator model)</strong>的微缩:每个算子是迭代器,上层 <code>next</code> 向下层<strong>按需拉数据</strong>,数据一条条流过,不物化中间结果。整个数据库查询引擎就是这种迭代器的层层嵌套——扫描算子、过滤算子、归并算子各是一个 <code>LsmIterator</code>,Phase G 的归并器会把多个 SstIter 当下游拉。</p>
+  <table>
+    <thead><tr><th>维度</th><th>我们的 SstIter</th><th>真 RocksDB / 通用做法</th></tr></thead>
+    <tbody>
+      <tr><td><strong>惰性 IO</strong></td><td>扫到第 i 块才 <code>read_block(i)</code></td><td>同;另加 <strong>prefetch / readahead</strong>(顺序扫时预读下一块摊薄延迟)、<strong>block cache</strong>(热块免重读,Phase S)</td></tr>
+      <tr><td><strong>错误通道</strong></td><td><code>next/seek</code> 不返回 <code>Result</code> → IO 错 <code>expect</code> panic(MVP)</td><td>迭代器存一个 <code>Status</code> 字段,<code>Valid()</code> 转 false,调用方 <code>iter.status()</code> 取错——<strong>把错误从控制流挪到状态位</strong>,因为迭代器接口不便处处返回 Result</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:迭代器接口("当前/前进")天然<strong>不便携带错误</strong>(返回值已被 item 占用)。两条出路——要么像我们 MVP 直接 panic(简单、能跑),要么像 RocksDB 把错误<strong>沉淀成一个状态位</strong>(<code>Valid()=false</code> + <code>status()</code>),让"没有更多了"和"出错了"用<strong>同一个 invalid 表达、再用旁路区分</strong>。这个"<strong>主通道传数据、旁路传错误</strong>"的模式,在流式 API、游标、异步 stream 里反复出现。我们诚实标注:MVP 选 panic,稳健版选 status 位(可留作后续小练习)。</p>
+
+  <h2>🧪 Harness 系统:扫描差分 + 跨块 + 惰性读放大</h2>
+  <div class="harness">
+    <div class="kicker">三组验法各抓一类 bug</div>
+    <p style="margin:.3em 0 0"><strong>① 扫描差分</strong>:从任意 <code>seek</code> 点起的扫描,必须逐条 == <code>BTreeMap::range(seek..)</code>。oracle 是标准库的有序 map,<strong>显然正确</strong>,抓"漏条/重条/顺序错/跨块丢"。<br>
+    <strong>② 跨块边界</strong>:强制小 <code>block_size</code> 切出多块,全量扫描计数必须等于写入条数——<strong>专打块接缝</strong>(next 跨块时最易漏掉新块首条或重复旧块末条)。<br>
+    <strong>③ 惰性读放大</strong>:给 <code>blocks_read</code> 计数器把"惰性"变成<strong>可执行契约</strong>——<code>seek</code> 只读 1 块、全量扫描恰好读 <code>num_blocks</code> 块。多读一块(误预载)或少读(漏块)立刻被抓。<strong>把性能承诺写成断言</strong>,承 E2。</p>
+  </div>
+
+  <h3>代码 3 — 三组 harness(接 sst.rs 的 tests)</h3>
+  <pre>    <span class="k">use</span> crate::iterator::LsmIterator;
+    <span class="k">use</span> std::collections::BTreeMap;
+
+    <span class="k">fn</span> <span class="f">build_multiblock</span>(path: &Path) -> BTreeMap&lt;Vec&lt;u8&gt;, Vec&lt;u8&gt;&gt; {
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">with_block_size</span>(64);   <span class="c">// 小块 → 强制多块</span>
+        <span class="k">let</span> <span class="k">mut</span> model = BTreeMap::<span class="f">new</span>();
+        <span class="k">for</span> i <span class="k">in</span> 0..200u32 {
+            <span class="k">let</span> (k, v) = (format!(<span class="s">"key{i:04}"</span>), format!(<span class="s">"val{i:04}"</span>));
+            b.<span class="f">add</span>(k.<span class="f">as_bytes</span>(), v.<span class="f">as_bytes</span>()).<span class="f">unwrap</span>();
+            model.<span class="f">insert</span>(k.<span class="f">into_bytes</span>(), v.<span class="f">into_bytes</span>());
+        }
+        b.<span class="f">finish</span>(path).<span class="f">unwrap</span>();
+        model
+    }
+
+    <span class="c">// ① 扫描差分:从多个 seek 点起 == BTreeMap::range</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">sst_iter_scan_differential</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"t.sst"</span>);
+        <span class="k">let</span> model = <span class="f">build_multiblock</span>(&path);
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="f">assert!</span>(r.<span class="f">num_blocks</span>() &gt; 1, <span class="s">"应切成多块"</span>);
+
+        <span class="k">for</span> probe <span class="k">in</span> [<span class="s">""</span>, <span class="s">"key0000"</span>, <span class="s">"key0099"</span>, <span class="s">"key01005"</span>, <span class="s">"key0199"</span>, <span class="s">"zzz"</span>] {
+            <span class="k">let</span> <span class="k">mut</span> it = r.<span class="f">iter</span>();
+            it.<span class="f">seek</span>(probe.<span class="f">as_bytes</span>());
+            <span class="k">let</span> <span class="k">mut</span> got = Vec::<span class="f">new</span>();
+            <span class="k">while</span> it.<span class="f">valid</span>() {
+                got.<span class="f">push</span>((it.<span class="f">key</span>().<span class="f">to_vec</span>(), it.<span class="f">value</span>().<span class="f">to_vec</span>()));
+                it.<span class="f">next</span>();
+            }
+            <span class="k">let</span> want: Vec&lt;_&gt; = model.<span class="f">range</span>(probe.<span class="f">as_bytes</span>().<span class="f">to_vec</span>()..)
+                .<span class="f">map</span>(|(k, v)| (k.<span class="f">clone</span>(), v.<span class="f">clone</span>())).<span class="f">collect</span>();
+            <span class="f">assert_eq!</span>(got, want, <span class="s">"seek({probe}) 起的扫描差分"</span>);
+        }
+    }
+
+    <span class="c">// ② 跨块:全量扫描穿过所有接缝,不漏不重、严格递增</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">sst_iter_full_scan_crosses_blocks</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"t.sst"</span>);
+        <span class="f">build_multiblock</span>(&path);
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+        <span class="k">let</span> <span class="k">mut</span> it = r.<span class="f">iter</span>(); it.<span class="f">seek_to_first</span>();
+        <span class="k">let</span> (<span class="k">mut</span> n, <span class="k">mut</span> prev) = (0u32, None::&lt;Vec&lt;u8&gt;&gt;);
+        <span class="k">while</span> it.<span class="f">valid</span>() {
+            <span class="k">if</span> <span class="k">let</span> Some(p) = &prev { <span class="f">assert!</span>(p.<span class="f">as_slice</span>() &lt; it.<span class="f">key</span>(), <span class="s">"严格递增"</span>); }
+            prev = Some(it.<span class="f">key</span>().<span class="f">to_vec</span>()); it.<span class="f">next</span>(); n += 1;
+        }
+        <span class="f">assert_eq!</span>(n, 200);                      <span class="c">// 跨所有 block 不漏不重</span>
+    }
+
+    <span class="c">// ③ 惰性读放大:seek 只读 1 块;全扫恰好读 num_blocks 块</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">sst_iter_lazy_block_reads</span>() {
+        <span class="k">let</span> dir = <span class="f">tempdir</span>().<span class="f">unwrap</span>();
+        <span class="k">let</span> path = dir.<span class="f">path</span>().<span class="f">join</span>(<span class="s">"t.sst"</span>);
+        <span class="f">build_multiblock</span>(&path);
+        <span class="k">let</span> r = SstReader::<span class="f">open</span>(&path).<span class="f">unwrap</span>();
+
+        <span class="k">let</span> base = r.<span class="f">blocks_read</span>();
+        <span class="k">let</span> <span class="k">mut</span> it = r.<span class="f">iter</span>(); it.<span class="f">seek</span>(b<span class="s">"key0000"</span>);
+        <span class="f">assert_eq!</span>(r.<span class="f">blocks_read</span>() - base, 1, <span class="s">"seek 只载 1 块"</span>);
+        <span class="k">while</span> it.<span class="f">valid</span>() { it.<span class="f">next</span>(); }
+        <span class="f">assert_eq!</span>(r.<span class="f">blocks_read</span>() - base, r.<span class="f">num_blocks</span>() <span class="k">as</span> u64, <span class="s">"全扫恰好每块读一次"</span>);
+    }</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test sst_iter</div>
+  <div class="done"><div class="kicker">F2 判定 — Phase F 全绿</div><p style="margin:.3em 0 0"><code>sst::tests::sst_iter_scan_differential ... ok</code><br><code>sst::tests::sst_iter_full_scan_crosses_blocks ... ok</code><br><code>sst::tests::sst_iter_lazy_block_reads ... ok</code><br>(+ F1 block_iter 两测 + E/D 全部回归)</p></div>
+
+  <div class="milestone">🏁 <strong>Phase F 达成:SST 有了有序游标</strong>。但注意——这是<strong>单个 SST 内</strong>的扫描。引擎对外的"全局范围扫描"(穿 active + imm + 多个 SST,且新值盖旧值)还要等 <strong>Phase G(k 路归并)+ Phase K(对外 seek/next/prev API)</strong>。本课交付的是那台归并机的<strong>零件</strong>:一个个统一接口的有序源。</p></div>
+
+  <h2>🔄 CI/CD:碰盘的扫描差分进 integration 档</h2>
+  <p>F2 三测都写临时 SST(<code>finish</code> 内有 <code>sync_all</code>),比 F1 纯内存块测试重。差分(200 条 × 多 seek 点)是长跑型,按 D 阶段定的规矩——<strong>碰盘/长跑进 <code>integration</code> 单线程档</strong>,纯逻辑留 <code>test</code> 快档。失败时 <code>"seek(key01005) 起的扫描差分"</code> 直接点出哪个 seek 点错了。</p>
+
+  <h2>核心问题(自己答)</h2>
+  <div class="ask">
+    <div class="kicker">F2 / Phase F 收尾</div>
+    <ol>
+      <li><strong>为什么 <code>seek</code> 不需要跨块、<code>next</code> 才需要</strong>:用本课开头那条性质(候选块末键 ≥ target ⇒ 块内必有解)讲清。如果稀疏索引存的是每块的<strong>首</strong>键而非末键,这条还成立吗?<code>seek</code> 会不会就需要跨块了?(提示:存首键的话,<code>partition_point</code> 选出的块,其首键 ≤ target,但块内末键可能 &lt; target → 解在下一块 → seek 就得跨块。<strong>存末键是让"候选块必含解"成立的关键设计</strong>。)</li>
+      <li><strong>错误去哪了</strong>:我们 <code>read_block(..).expect()</code> 把 IO 错变 panic。改成 RocksDB 式"<code>Valid()=false</code> + <code>status()</code> 状态位"要加什么?(<code>SstIter</code> 加一个 <code>status: Result&lt;()&gt;</code> 字段,<code>load</code> 失败时填错并令 <code>cur=None</code>;<code>valid</code> 照旧 false。调用方扫完后查 <code>status</code> 区分"扫完了"与"扫炸了"。)</li>
+      <li><strong>顺序扫描为什么该 prefetch</strong>:惰性"扫到才读"省了不需要的块,但顺序大扫描时<strong>每跨一块都同步等一次磁盘</strong>。真引擎怎么把这段延迟摊掉?(readahead/prefetch:扫第 i 块时异步预读第 i+1 块;Phase S 的 block cache 让热块免重读。我们 MVP 先要正确,优化留后。)</li>
+      <li><strong>这个零件怎么拼进归并</strong>:Phase G 要把 memtable 迭代器 + 若干 SstIter 合成一条全局有序流。它会持有 <code>Vec&lt;Box&lt;dyn LsmIterator&gt;&gt;</code>,每轮看所有源的 <code>key()</code>、推最小的。回看 F1 为什么坚持"窥视(<code>key</code>)与前进(<code>next</code>)解耦"——没有这一步,归并根本写不出来。</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>下一步:Phase G — k 路归并 iterator.</strong> 把本课的零件(统一 <code>LsmIterator</code> 的多个有序源)用一个 <code>MergingIterator</code> 合并成<strong>一条全局有序、新值盖旧值</strong>的流。<code>trait LsmIterator</code> + <code>Box&lt;dyn ..&gt;</code> 的多态红利在那里兑现。harness:归并差分(vs 合并后的 BTreeMap)。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_based_table_iterator.h">block_based_table_iterator.h</a>(两级 index/data 迭代器、跨块推进)· <a href="https://github.com/facebook/rocksdb/blob/main/table/merging_iterator.cc">merging_iterator.cc</a>(下一站 G 的归并器)。</p>
+    <p>想完跟我对答案,或说"开 Phase G"。卡住随时问。</p>
+  </div>
+</div>
+</body>
+</html>

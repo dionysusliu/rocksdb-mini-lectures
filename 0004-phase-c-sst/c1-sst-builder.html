@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C1 · SstBuilder 有序写盘</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.5em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:30px;line-height:1.2;margin:.2em 0 .3em}
+  h2{font-size:21px;margin:2em 0 .4em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:17px;margin:1.4em 0 .3em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2)}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  pre{background:#1e1b16;color:#ede6d6;padding:16px 18px;border-radius:8px;overflow:auto;font-size:13.5px;line-height:1.5;font-family:ui-monospace,Menlo,monospace}
+  pre .c{color:#8a8170}.k{color:#d99a6c}.s{color:#a8c98a}.t{color:#7fb0c9}.f{color:#e0c97f}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:14px 20px;margin:1.2em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .steps{counter-reset:s;list-style:none;padding:0}
+  .steps>li{position:relative;padding:2px 0 2px 42px;margin:.8em 0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:0;width:28px;height:28px;background:var(--accent);color:#fff;border-radius:50%;text-align:center;line-height:28px;font-family:ui-monospace,monospace;font-size:13px}
+  .cmd{background:#11140f;color:#cfe8b8;padding:11px 16px;border-radius:6px;font-family:ui-monospace,monospace;font-size:13px;margin:.6em 0}
+  .cmd::before{content:"$ ";color:#6b8a4a}
+  .harness{background:#eef3f6;border:1px solid #cfe0e8;border-left:4px solid var(--accent2);padding:14px 20px;border-radius:4px;margin:1.2em 0}
+  .harness .kicker{color:var(--accent2)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:14px 20px;border-radius:6px;margin:1.4em 0}
+  .ask .kicker{color:var(--warn)}
+  .ask ol{margin:.4em 0}
+  .src{background:#f2f5f3;border:1px solid #cfe0d2;padding:6px 12px;border-radius:4px;font-size:.85em;font-family:ui-monospace,monospace;display:inline-block;margin:.2em 0}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .done{background:#eef5ee;border:1px solid #cfe0cf;border-left:4px solid var(--good);padding:12px 18px;border-radius:4px}
+  .done .kicker{color:var(--good)}
+  .warnbox{background:#fcf3ee;border:1px solid #e8c9b8;border-left:4px solid var(--accent);padding:10px 16px;border-radius:4px;font-size:.92em}
+  .bytemap{display:flex;flex-wrap:wrap;gap:4px;margin:1em 0;font-family:ui-monospace,monospace;font-size:11px}
+  .bytemap div{padding:7px 9px;border-radius:4px;text-align:center;border:1px solid #ccc}
+  .bm-d{background:#e8f0e0;border-color:#b8d0a0}.bm-i{background:#e0ecf5;border-color:#a8c4e0}.bm-f{background:#fde8e0;border-color:#e0a890}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="index.html">← Phase C 总览</a> &nbsp;·&nbsp; C1 &nbsp;·&nbsp; <a href="c2-sst-reader.html">C2 Reader →</a></div>
+
+  <div class="kicker">STEP C1 · Phase C SST</div>
+  <h1>SstBuilder — 有序写盘</h1>
+  <p>SST 的第一性问题:<strong>一堆有序 KV,在磁盘上排成什么样,既能高效点查、又自描述(能独立读回)?</strong>这一步设计布局 + 写出去。</p>
+
+  <div class="goal">
+    <div class="kicker">GOAL</div>
+    <p style="margin:.3em 0 0">交付 <code>src/sst.rs</code> 的 <code>SstBuilder</code>:<code>add(key,val)</code>(强制升序)+ <code>finish(path)</code> 落盘成 data+index+footer 三段。</p>
+    <p style="margin:.3em 0 0"><strong>Done when:</strong> 升序不变量被强制(乱序 add 报错);文件结构自洽(footer magic 正确)。完整验证连 C2 一起跑。</p>
+  </div>
+
+  <h2>SST 文件布局(MVP)</h2>
+  <div class="bytemap">
+    <div class="bm-d">data:&nbsp;entry*&nbsp;(升序)</div>
+    <div class="bm-i">index:&nbsp;count + (key,offset)*</div>
+    <div class="bm-f">footer:&nbsp;idx_off&nbsp;idx_len&nbsp;magic&nbsp;(24B)</div>
+  </div>
+  <p style="font-size:.9em;color:var(--soft)">
+    <code>entry</code> = <code>klen(u32) key vlen(u32) val</code>。
+    <code>index</code> 每条 entry 一个 <code>(key, data内偏移)</code>。
+    读时<strong>从尾部</strong>读固定 24B footer → 定位 index → 二分。footer 在尾,因为写时长度未知;放尾才能一遍流式写。</p>
+
+  <h3>三个设计选择(对标 RocksDB,这是要学的)</h3>
+  <table style="border-collapse:collapse;width:100%;font-size:.88em">
+    <tr style="background:var(--code-bg)"><th style="border:1px solid var(--rule);padding:6px">选择</th><th style="border:1px solid var(--rule);padding:6px">我们 MVP</th><th style="border:1px solid var(--rule);padding:6px">RocksDB</th></tr>
+    <tr><td style="border:1px solid var(--rule);padding:6px"><strong>索引粒度</strong></td><td style="border:1px solid var(--rule);padding:6px">每 entry 一项(全量索引)</td><td style="border:1px solid var(--rule);padding:6px">每 <strong>data block</strong>(~4KB)一项(稀疏),块内再线性/restart 找。<span class="src">block_builder.cc</span></td></tr>
+    <tr><td style="border:1px solid var(--rule);padding:6px"><strong>key 存储</strong></td><td style="border:1px solid var(--rule);padding:6px">完整 key,每条都存</td><td style="border:1px solid var(--rule);padding:6px">restart points 间<strong>前缀压缩</strong>(只存与前一 key 的差异部分)</td></tr>
+    <tr><td style="border:1px solid var(--rule);padding:6px"><strong>footer</strong></td><td style="border:1px solid var(--rule);padding:6px">idx_off + idx_len + magic</td><td style="border:1px solid var(--rule);padding:6px">index handle + metaindex handle(指向 bloom/属性)+ magic + 版本。<span class="src">format.cc Footer</span></td></tr>
+  </table>
+  <div class="warnbox"><strong>诚实标注简化.</strong> 砍了 block 分块、前缀压缩、metaindex(bloom/属性块)。代价:索引随 key 数线性涨(不是按块)、读时整文件入内存。这些正是 <strong>Phase E(block 化)、R(bloom)、S(block cache)</strong> 要补的。先把"有序自描述文件"跑通。</div>
+
+  <h2>步骤</h2>
+  <ol class="steps">
+    <li>先给 <code>src/memtable.rs</code> 加一个有序遍历 <code>iter()</code>(「代码 1」)——flush 要靠它按序取出。</li>
+    <li>新建 <code>src/sst.rs</code>,敲入「代码 2」<code>SstBuilder</code>(<code>SstReader</code> 留 C2)。</li>
+    <li><code>src/lib.rs</code> 加 <code>pub mod sst;</code>。</li>
+    <li>升序不变量 harness(「代码 3」)。完整 round-trip 要等 C2 的 reader,这步先验"乱序被拒"。</li>
+  </ol>
+
+  <h3>代码 1 — <code>memtable.rs</code> 加有序 <code>iter()</code></h3>
+  <pre><span class="k">impl</span> <span class="t">MemTable</span> {
+    <span class="c">// ... 已有 new/put/get/approximate_size/is_full ...</span>
+
+    <span class="c">/// 有序遍历(skiplist 天然字节序)。flush 成有序 SST 的基础。</span>
+    <span class="k">pub fn</span> <span class="f">iter</span>(&self) -> <span class="k">impl</span> Iterator&lt;Item = (Bytes, Bytes)&gt; + <span class="s">'_</span> {
+        self.map.<span class="f">iter</span>().<span class="f">map</span>(|e| (e.<span class="f">key</span>().<span class="f">clone</span>(), e.<span class="f">value</span>().<span class="f">clone</span>()))
+    }
+}</pre>
+
+  <h3>代码 2 — <code>src/sst.rs</code> 的 <code>SstBuilder</code></h3>
+  <pre><span class="c">// src/sst.rs — Sorted String Table:冻结 MemTable 倒成的有序不可变磁盘文件。</span>
+<span class="k">use</span> std::fs::File;
+<span class="k">use</span> std::io::Write;
+<span class="k">use</span> std::path::Path;
+<span class="k">use</span> anyhow::{bail, Result};
+<span class="k">use</span> bytes::Bytes;
+
+<span class="k">const</span> MAGIC: <span class="t">u64</span> = <span class="s">0x6d696e695f737374</span>; <span class="c">// "mini_sst",读时校验格式</span>
+<span class="k">const</span> FOOTER_LEN: <span class="t">usize</span> = 24;            <span class="c">// idx_off(8) + idx_len(8) + magic(8)</span>
+
+<span class="c">/// add 必须按 key 升序调用(调用者保证,通常来自有序 MemTable::iter)。</span>
+<span class="k">pub struct</span> <span class="t">SstBuilder</span> {
+    data: Vec&lt;<span class="t">u8</span>&gt;,
+    index: Vec&lt;(Bytes, <span class="t">u64</span>)&gt;, <span class="c">// (key, data 内偏移)</span>
+    last_key: Option&lt;Bytes&gt;,
+}
+<span class="k">impl</span> <span class="t">SstBuilder</span> {
+    <span class="k">pub fn</span> <span class="f">new</span>() -> Self { Self { data: Vec::<span class="f">new</span>(), index: Vec::<span class="f">new</span>(), last_key: None } }
+
+    <span class="k">pub fn</span> <span class="f">add</span>(&<span class="k">mut</span> self, key: &[<span class="t">u8</span>], val: &[<span class="t">u8</span>]) -> Result&lt;()&gt; {
+        <span class="c">// 不变量:严格升序(输入应是去重后的有序流)。let-chain(edition 2024)折叠嵌套 if。</span>
+        <span class="k">if let</span> Some(last) = &self.last_key
+            && key &lt;= last.<span class="f">as_ref</span>()
+        {
+            <span class="f">bail!</span>(<span class="s">"SstBuilder.add 非升序: {:?} &lt;= {:?}"</span>, key, last);
+        }
+        <span class="k">let</span> off = self.data.<span class="f">len</span>() <span class="k">as</span> <span class="t">u64</span>;
+        self.data.<span class="f">extend_from_slice</span>(&(key.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>());
+        self.data.<span class="f">extend_from_slice</span>(key);
+        self.data.<span class="f">extend_from_slice</span>(&(val.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>());
+        self.data.<span class="f">extend_from_slice</span>(val);
+        self.index.<span class="f">push</span>((Bytes::<span class="f">copy_from_slice</span>(key), off));
+        self.last_key = Some(Bytes::<span class="f">copy_from_slice</span>(key));
+        Ok(())
+    }
+
+    <span class="k">pub fn</span> <span class="f">finish</span>(self, path: &Path) -> Result&lt;()&gt; {
+        <span class="k">let</span> <span class="k">mut</span> f = File::<span class="f">create</span>(path)?;
+        f.<span class="f">write_all</span>(&self.data)?;
+        <span class="k">let</span> index_offset = self.data.<span class="f">len</span>() <span class="k">as</span> <span class="t">u64</span>;
+        <span class="c">// 编码 index:count,然后每条 klen|key|offset</span>
+        <span class="k">let</span> <span class="k">mut</span> idx = Vec::<span class="f">new</span>();
+        idx.<span class="f">extend_from_slice</span>(&(self.index.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>());
+        <span class="k">for</span> (k, off) <span class="k">in</span> &self.index {
+            idx.<span class="f">extend_from_slice</span>(&(k.<span class="f">len</span>() <span class="k">as</span> <span class="t">u32</span>).<span class="f">to_le_bytes</span>());
+            idx.<span class="f">extend_from_slice</span>(k);
+            idx.<span class="f">extend_from_slice</span>(&off.<span class="f">to_le_bytes</span>());
+        }
+        f.<span class="f">write_all</span>(&idx)?;
+        <span class="c">// footer:让文件自描述,读时从尾部固定 24B 解析</span>
+        <span class="k">let</span> <span class="k">mut</span> footer = Vec::<span class="f">with_capacity</span>(FOOTER_LEN);
+        footer.<span class="f">extend_from_slice</span>(&index_offset.<span class="f">to_le_bytes</span>());
+        footer.<span class="f">extend_from_slice</span>(&(idx.<span class="f">len</span>() <span class="k">as</span> <span class="t">u64</span>).<span class="f">to_le_bytes</span>());
+        footer.<span class="f">extend_from_slice</span>(&MAGIC.<span class="f">to_le_bytes</span>());
+        f.<span class="f">write_all</span>(&footer)?;
+        f.<span class="f">sync_all</span>()?; <span class="c">// SST 也要落盘才算数(同 WAL 的持久边界)</span>
+        Ok(())
+    }
+}
+<span class="k">impl</span> Default <span class="k">for</span> <span class="t">SstBuilder</span> { <span class="k">fn</span> <span class="f">default</span>() -> Self { Self::<span class="f">new</span>() } }</pre>
+
+  <h2>🧰 Coding style：builder 模式 + consuming self + 不变量在构造点强制</h2>
+  <p>三个可迁移范式,全在这段小代码里:</p>
+  <ul>
+    <li><strong>Builder 模式</strong>:<code>SstBuilder</code> 累积状态(<code>add</code> 多次),<code>finish</code> 一次性产出成品。复杂对象的构造与表示分离——任意语言通用(Java StringBuilder、Rust <code>*Builder</code>、protobuf builder)。</li>
+    <li><strong>Consuming <code>self</code> 终结</strong>:<code>finish(self, ...)</code> 按值取走 <code>self</code>——调用后 builder 被<strong>移动消费,无法再用</strong>。类型系统保证"finish 后不会再 add",非法状态在编译期就不可表达。这是 Rust 把生命周期编进 API 的典型,迁移到别处就是"一次性资源/终态对象"设计。</li>
+    <li><strong>不变量在构造点强制</strong>:升序检查放在 <code>add</code> 里,坏数据<strong>进不来</strong>而非"进来后再查"。"parse, don't validate" / "make illegal states unrepresentable" 的精神——把约束前移到边界。</li>
+    <li><strong>let-chain</strong>(edition 2024):<code>if let Some(x) = ... && cond</code> 折叠嵌套 if。clippy 会盯这个(见下方 CI/CD)。</li>
+  </ul>
+
+  <h2>🧠 System mindset：自描述文件格式 · footer/trailer 在尾</h2>
+  <p>"长度未知时,把目录/索引写在<strong>尾部</strong>,读时从尾往回解析"——这不是 LSM 独有,是<strong>文件格式的通用范式</strong>:</p>
+  <table>
+    <thead><tr><th>系统</th><th>尾部放了什么</th></tr></thead>
+    <tbody>
+      <tr><td><strong>ZIP</strong></td><td>"中央目录"在文件末尾(End of Central Directory record)——这就是为什么能往 zip 尾追加而不重写</td></tr>
+      <tr><td><strong>ELF</strong>(Linux 可执行)</td><td>section header table 偏移记在头,但布局同理:元数据与数据分离、按偏移寻址</td></tr>
+      <tr><td><strong>SQLite / PDF</strong></td><td>PDF 的 xref 表在尾;增量更新只追加 + 新 xref</td></tr>
+      <tr><td><strong>我们的 SST</strong></td><td>footer(index 偏移 + magic)在尾,一遍流式写完即自描述</td></tr>
+    </tbody>
+  </table>
+  <p><strong>迁移收获</strong>:为什么"trailer 在尾"?因为<strong>流式写入时总长度未知</strong>——你不能在开头写"index 在偏移 X",X 那时还不存在。放尾 = 写一遍、不回头、不预留。这条直觉在设计任何 append-only 格式/协议(日志、列存、网络帧)时反复出现。<code>magic</code> 数则是<strong>格式自我标识</strong>:读到不符立刻拒,防止把别的文件/旧版本误读成数据。</p>
+
+  <h2>Harness 系统 ⑥：格式稳定性 / 不变量</h2>
+  <div class="harness">
+    <div class="kicker">为什么这里这样验</div>
+    <p style="margin:.3em 0 0">磁盘格式的两类致命 bug:<strong>违反约定的输入悄悄写进去</strong>(乱序 → 二分失效),和<strong>结构写歪</strong>(偏移/magic 错 → 读不回)。
+    C1 先用<strong>不变量 harness</strong> 把"升序"这条契约钉死(乱序必报错);完整的"写回再读"格式 round-trip 等 C2 的 reader 到位一起验。先证"坏输入进不来"。</p>
+  </div>
+
+  <h3>代码 3 — 升序不变量 harness（接 <code>sst.rs</code> 末尾）</h3>
+  <pre><span class="c">#[cfg(test)]</span>
+<span class="k">mod</span> tests {
+    <span class="k">use</span> super::*;
+    <span class="c">// 不变量:非升序 add 必须报错(相等也拒——输入应已去重)</span>
+    <span class="c">#[test]</span>
+    <span class="k">fn</span> <span class="f">rejects_unsorted</span>() {
+        <span class="k">let</span> <span class="k">mut</span> b = SstBuilder::<span class="f">new</span>();
+        b.<span class="f">add</span>(b<span class="s">"b"</span>, b<span class="s">"1"</span>).<span class="f">unwrap</span>();
+        <span class="f">assert!</span>(b.<span class="f">add</span>(b<span class="s">"a"</span>, b<span class="s">"2"</span>).<span class="f">is_err</span>()); <span class="c">// 逆序</span>
+        <span class="f">assert!</span>(b.<span class="f">add</span>(b<span class="s">"b"</span>, b<span class="s">"3"</span>).<span class="f">is_err</span>()); <span class="c">// 相等</span>
+    }
+}</pre>
+
+  <div class="cmd">cd rocksdb-mini && cargo test sst</div>
+  <div class="done"><div class="kicker">看到这个就过(完整 round-trip 在 C2)</div><p style="margin:.3em 0 0"><code>test sst::tests::rejects_unsorted ... ok</code></p></div>
+
+  <h2>🔄 CI/CD：把流水线搭起来（bootstrap）</h2>
+  <p>Phase C 引擎第一次有了真东西,正好<strong>开始自动化</strong>。本课起步:每次 push/PR,GitHub 自动跑 <code>cargo test</code>,绿了才算数。</p>
+
+  <h3>一次性:让仓库能 push</h3>
+  <p><code>rocksdb-mini</code> 现在还没 git 历史/远程。一次性做这几步(<strong>你来跑</strong>):</p>
+  <pre style="background:#11140f;color:#cfe8b8"><span class="c"># 在 rocksdb-mini 下</span>
+git init &amp;&amp; git add -A &amp;&amp; git commit -m "mini-lsm: phase A/B/C"
+gh repo create rocksdb-mini --private --source=. --push   <span class="c"># 需要 gh CLI 已登录</span></pre>
+
+  <h3>新建 <code>.github/workflows/ci.yml</code></h3>
+  <p>本课先放 <code>test</code> job(<code>lint</code> job 留 C2 加):</p>
+  <pre><span class="c"># .github/workflows/ci.yml</span>
+<span class="t">name</span>: ci
+<span class="t">on</span>:
+  <span class="t">push</span>: { <span class="t">branches</span>: [main] }
+  <span class="t">pull_request</span>:
+<span class="t">jobs</span>:
+  <span class="t">test</span>:
+    <span class="t">runs-on</span>: ubuntu-latest
+    <span class="t">steps</span>:
+      - <span class="t">uses</span>: actions/checkout@v4
+      - <span class="t">uses</span>: dtolnay/rust-toolchain@stable
+      - <span class="t">uses</span>: Swatinem/rust-cache@v2
+      - <span class="t">run</span>: cargo test --all --verbose</pre>
+  <p style="font-size:.9em;color:var(--soft)">push 后到仓库 <strong>Actions</strong> 页看绿勾。这个 yml 我已在参考实现里本地验过:YAML 合法、<code>cargo test --all</code> 真绿。</p>
+
+  <div class="harness" style="border-left-color:var(--good);background:#eef5ee;border-color:#cfe0cf">
+    <div class="kicker" style="color:var(--good)">CI 教学点:lint 是会咬人的</div>
+    <p style="margin:.3em 0 0">C2 会给 CI 加 <code>clippy -D warnings</code> 门禁。届时你会发现 <strong>clippy 真的报错</strong>:本课 <code>add</code> 的嵌套 <code>if</code> 会被 <code>collapsible_if</code> 抓到 → 提示用 <strong>let-chain</strong> 折叠(就是上面代码已经写成的样子)。
+    这是 CI 的价值现场:<strong>机器逼你写更地道的代码</strong>。我们提前按 clippy 的建议写了,所以门禁能过——你也可以故意写回嵌套 if,看 CI 变红,再改回来,体会这个回路。</p>
+  </div>
+
+  <h2>核心问题（自己答）</h2>
+  <div class="ask">
+    <div class="kicker">想清楚再进 C2</div>
+    <ol>
+      <li><strong>footer 为什么在尾部</strong>:为什么 index 的位置信息放文件<strong>末尾</strong>而不是开头?(提示:写的时候 data 多长还不知道。)读的时候怎么"从尾巴往回找"?</li>
+      <li><strong>升序从哪来,可靠吗</strong>:<code>add</code> 要求升序,我们靠 <code>MemTable::iter()</code> 提供。skiplist 的 iter 一定升序吗?如果将来 MemTable 换成哈希实现(RocksDB 有 HashSkipList),flush 前还得做什么?</li>
+      <li><strong>覆盖写在哪消解</strong>:MemTable 里 <code>apple</code> 被覆盖两次,但 <code>iter()</code> 只吐一条最新值。所以 SST 里同 key <strong>只有一份</strong>。那"多版本/历史值"在 LSM 里靠什么保留?(提示:不同 SST 文件 + seq。这是 Phase H InternalKey 的活。)</li>
+      <li><strong>magic 数的意义</strong>:footer 末尾的 8 字节 magic 有什么用?读到一个 magic 不符的文件该怎么办?这和 B1 你想过的"比较器名字写进文件"是同一类防御吗?</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/table/block_based/block_builder.cc">block_builder.cc</a>(restart points/前缀压缩) ·
+       <a href="https://github.com/facebook/rocksdb/wiki/Rocksdb-BlockBasedTable-Format">Wiki: BlockBasedTable Format</a>(footer 真实布局)。</p>
+    <p><strong>下一步.</strong> 能写出去 → <a href="c2-sst-reader.html">C2:读回来、二分点查、跑完整 round-trip 差分</a>。</p>
+    <p>不清楚的随时问我。</p>
+  </div>
+</div>
+</body>
+</html>

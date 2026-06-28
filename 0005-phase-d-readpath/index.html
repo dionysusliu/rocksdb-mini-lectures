@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase D · 读路径合并 — mini-LSM 自建引擎</title>
+<style>
+  :root{--ink:#1a1a1a;--paper:#fdfcf9;--rule:#d9d4c7;--soft:#6b6453;--accent:#7a3b2e;--accent2:#2e5d7a;--code-bg:#f4f1e8;--good:#3a6b3a;--warn:#9a6a1a;}
+  *{box-sizing:border-box}
+  body{background:var(--paper);color:var(--ink);font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.62;margin:0}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 28px 120px}
+  .nav{font-family:ui-monospace,monospace;font-size:12px;color:var(--soft);margin-bottom:1.2em}
+  .nav a{color:var(--accent2);text-decoration:none}
+  .kicker{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--soft)}
+  h1{font-size:34px;line-height:1.2;margin:.2em 0 .1em}
+  h2{font-size:23px;margin:2.2em 0 .5em;border-bottom:1px solid var(--rule);padding-bottom:.25em}
+  h3{font-size:18px;margin:1.6em 0 .4em;color:var(--accent)}
+  p{margin:.7em 0}
+  a{color:var(--accent2);text-decoration:none;border-bottom:1px solid #bcd}
+  a:hover{background:#eef4f8}
+  code{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:.88em;background:var(--code-bg);padding:1px 5px;border-radius:4px}
+  .lede{font-size:19px;color:#333}
+  .goal{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--accent);padding:16px 20px;margin:1.4em 0;border-radius:4px}
+  .goal .kicker{color:var(--accent)}
+  .mission{background:#f2f5f3;border:1px solid #cfe0d2;padding:12px 18px;border-radius:4px;font-size:.95em}
+  .cards{display:grid;gap:14px;margin:1.2em 0}
+  .card{display:block;border:1px solid var(--rule);border-radius:6px;padding:18px 20px;background:#fff;color:var(--ink)}
+  .card:hover{border-color:var(--accent);box-shadow:0 3px 14px rgba(0,0,0,.06)}
+  .card .step{font-family:ui-monospace,monospace;font-size:12px;color:var(--accent);letter-spacing:.1em}
+  .card h3{margin:.2em 0 .3em;color:var(--ink)}
+  .card p{margin:.2em 0;font-size:.92em;color:var(--soft)}
+  .meta{font-family:ui-monospace,monospace;font-size:.78em;color:var(--soft);margin-top:.6em}
+  table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.9em}
+  th,td{border:1px solid var(--rule);padding:7px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg)}
+  .foot{margin-top:3em;padding-top:1em;border-top:1px solid var(--rule);font-size:.85em;color:var(--soft)}
+  .ask{background:#fbf6ee;border:1px dashed var(--warn);padding:12px 18px;border-radius:6px;font-size:.92em}
+  .milestone{background:#fff;border:1px solid var(--rule);border-left:4px solid var(--good);padding:10px 18px;border-radius:4px;margin:1em 0}
+  svg{max-width:100%;display:block;margin:1em auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav"><a href="../roadmap.html">← 总路线图</a> &nbsp;·&nbsp; <a href="../0004-phase-c-sst/index.html">Phase C</a> &nbsp;·&nbsp; Phase D</div>
+
+  <div class="kicker">阶段 4 · 自建引擎 · Lab 0005</div>
+  <h1>Phase D — 读路径合并(触达 M1 MVP)</h1>
+  <p class="lede">Phase C 把数据倒进了 SST,却留了个<strong>故意的空洞</strong>:<code>Engine::get</code> 只查 active MemTable,flush 进 SST 的数据读不回来。这一阶段补上完整的 <strong>LSM 查找链</strong>——<code>get</code> 顺着 <strong>active → immutable → SST,新到旧</strong>找,第一个命中即返回。补完这条链,引擎第一次 <strong>Put / Get / 重启 / flush 全闭环</strong>:<strong>M1 MVP 达成。</strong></p>
+
+  <div class="mission">
+    <strong>Mission 锚点.</strong> LSM 把一次写"摊"在多个有序结构里(内存表 + 一堆 SST),换来极快的写。代价转嫁给<strong>读</strong>:一个 key 可能在任意一层,且<strong>同名 key 的新版本影子旧版本</strong>。读路径的职责就是——按<strong>从新到旧</strong>的顺序合并这些层,让上层把下层挡住。对标 RocksDB 的 <code>SuperVersion</code>(mem + imm + version)与 <code>DBImpl::GetImpl</code> 的三段式查找。
+  </div>
+
+  <div class="goal">
+    <div class="kicker">本 Lab 宣称的 GOAL</div>
+    <ol style="margin:.4em 0">
+      <li><strong>读穿 SST</strong>:<code>Engine</code> 持有 <code>Vec&lt;SstReader&gt;</code>(新到旧),<code>get</code> 在 active 落空后顺着 SST 列表新到旧找;<code>open</code> 发现磁盘上的 <code>*.sst</code> 并装载,<code>next_sst</code> 续号不覆盖旧文件。</li>
+      <li><strong>读穿 immutable</strong>:引入 <code>Vec&lt;Arc&lt;MemTable&gt;&gt;</code> 不可变表层,<code>freeze</code> 把 active 整表移入;<code>get</code> 在 active 与 SST 之间夹查 immutable。<code>flush</code> 排空内存(active+imm)成 SST 再截 WAL。</li>
+      <li><strong>自动落盘</strong>:<code>put</code> 检测 <code>is_full</code> 自动 flush(A3 那个"满了"信号终于接上闭环)。</li>
+    </ol>
+    <p style="margin:.4em 0 0"><strong>Done when:</strong> <code>cargo test</code> 全绿,含<strong>分层查找差分</strong>(随机交织 put/freeze/flush 对拍扁平 BTreeMap)与<strong>重启重发现 SST</strong> 两类 harness。</p>
+  </div>
+
+  <div class="milestone">🏁 <strong>本 Lab 收尾即 M1 — MVP 引擎</strong>:Put / Get / 重启持久 / flush 全通。路线图开头说的"先跑通",到这里第一次成真。</div>
+
+  <h3>一图看清查找链</h3>
+  <svg viewBox="0 0 700 200" font-family="ui-monospace,monospace" font-size="12">
+    <rect x="20" y="80" width="90" height="40" rx="6" fill="#fff" stroke="#2e5d7a"/>
+    <text x="65" y="104" text-anchor="middle" fill="#2e5d7a">get(k)</text>
+    <line x1="110" y1="100" x2="150" y2="100" stroke="#999" marker-end="url(#a)"/>
+
+    <rect x="150" y="78" width="120" height="44" rx="6" fill="#e8f0e0" stroke="#7a9a5a"/>
+    <text x="210" y="96" text-anchor="middle" fill="#3a5a2a">active MemTable</text>
+    <text x="210" y="112" text-anchor="middle" fill="#888" font-size="10">最新写,可变</text>
+
+    <rect x="290" y="78" width="120" height="44" rx="6" fill="#fdf3e0" stroke="#c9a25a"/>
+    <text x="350" y="96" text-anchor="middle" fill="#8a5a12">immutable[..]</text>
+    <text x="350" y="112" text-anchor="middle" fill="#888" font-size="10">冻结待 flush,新→旧</text>
+
+    <rect x="430" y="78" width="120" height="44" rx="6" fill="#fcf3ee" stroke="#c98a6a"/>
+    <text x="490" y="96" text-anchor="middle" fill="#7a3b2e">SST[..]</text>
+    <text x="490" y="112" text-anchor="middle" fill="#888" font-size="10">磁盘,新→旧</text>
+
+    <line x1="270" y1="100" x2="290" y2="100" stroke="#7a3b2e" stroke-width="2" marker-end="url(#a)"/>
+    <line x1="410" y1="100" x2="430" y2="100" stroke="#7a3b2e" stroke-width="2" marker-end="url(#a)"/>
+    <text x="280" y="70" text-anchor="middle" fill="#7a3b2e" font-size="10">落空↘</text>
+    <text x="420" y="70" text-anchor="middle" fill="#7a3b2e" font-size="10">落空↘</text>
+
+    <text x="210" y="150" text-anchor="middle" fill="#3a6b3a" font-size="11">命中即返回 ✓</text>
+    <text x="350" y="150" text-anchor="middle" fill="#3a6b3a" font-size="11">命中即返回 ✓</text>
+    <text x="490" y="150" text-anchor="middle" fill="#3a6b3a" font-size="11">命中即返回 ✓</text>
+    <text x="350" y="180" text-anchor="middle" fill="#888" font-size="11">铁律:从新到旧 · 第一个 Some 就是最新值(暂无墓碑)</text>
+    <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#999"/></marker></defs>
+  </svg>
+
+  <h2>路线:三个最小步</h2>
+  <div class="cards">
+    <a class="card" href="d1-sst-readpath.html">
+      <div class="step">STEP D1</div>
+      <h3>读路径接 SST + 重启发现</h3>
+      <p><code>Engine</code> 持 <code>Vec&lt;SstReader&gt;</code> 新到旧;<code>get</code> 落空查 SST;<code>open</code> 扫盘装载 <code>*.sst</code>、续号。补上 Phase C 的"故意空洞"。对标 Version::Get。</p>
+      <div class="meta">harness 系统:<strong>重启重发现(跨进程)+ 新到旧覆盖</strong></div>
+    </a>
+    <a class="card" href="d2-immutable-merge.html">
+      <div class="step">STEP D2</div>
+      <h3>immutable 表层 + 分层差分</h3>
+      <p>引入 <code>Vec&lt;Arc&lt;MemTable&gt;&gt;</code>;<code>freeze</code> 移表、<code>get</code> 夹查 immutable、<code>flush</code> 排空内存。对标 SuperVersion(mem→imm→current)。</p>
+      <div class="meta">harness 系统:<strong>分层查找差分(旗舰)</strong></div>
+    </a>
+    <a class="card" href="d3-auto-flush.html">
+      <div class="step">STEP D3</div>
+      <h3>满了自动 flush</h3>
+      <p><code>put</code> 检测 <code>is_full</code> 自动落盘——A3 的"满了"信号终于接上动作。诚实标注:同步 flush 堵写路径 = write stall(Phase W)。</p>
+      <div class="meta">harness 系统:<strong>自触发不变量</strong></div>
+    </a>
+  </div>
+
+  <h2>本 Lab 的 harness 主题:合并语义的可信</h2>
+  <p>读路径的 bug 是<strong>语义级</strong>的:数据没丢、文件没坏,但<strong>读到了旧版本</strong>(层序搞反)、或<strong>该有的没读到</strong>(漏了某层)。这类 bug 用单点断言很难抓,必须用<strong>差分</strong>把引擎的复杂内部布局对拍一个简单 oracle。</p>
+  <table>
+    <thead><tr><th>Harness 系统</th><th>抓什么</th><th>用在</th></tr></thead>
+    <tbody>
+      <tr><td><strong>重启重发现(跨进程持久)</strong></td><td><code>open</code> 必须从磁盘文件名重建 SST 列表 + 续号;重开后老 SST 仍可读、新 flush 不覆盖</td><td>D1</td></tr>
+      <tr><td><strong>分层查找差分</strong></td><td>随机交织 put/freeze/flush,数据被摊在 active+imm+多个 SST、内部反复重排;每步 <code>get</code> 仍须 == 扁平 <code>BTreeMap</code></td><td>D2</td></tr>
+      <tr><td><strong>自触发不变量</strong></td><td>狂写不手动 flush,引擎应自己落盘且全程可读</td><td>D3</td></tr>
+    </tbody>
+  </table>
+
+  <div class="ask">
+    <strong>带着这个问题进 D1</strong>:同一个 key <code>"a"</code> 既在一个旧 SST 里(值 <code>"1"</code>),又在 active 里(值 <code>"2"</code>)。<code>get("a")</code> 要返回哪个?为什么?如果反过来——SST 比 memtable"新",查找顺序该怎么变?(这就是"新到旧"四个字的全部分量。想清楚再写代码。)
+  </div>
+
+  <div class="foot">
+    <p><strong>前置.</strong> Phase A(<code>memtable.rs</code>,含有序 <code>iter()</code>)+ B(<code>wal.rs</code>)+ C(<code>sst.rs</code>:<code>SstBuilder</code>/<code>SstReader</code>,<code>engine.rs</code>:<code>flush</code>)就位、<code>cargo test</code> 绿。本 Lab <strong>只改 <code>engine.rs</code></strong>(不碰 sst/wal/memtable)。卡住可对照 worktree 的 <code>reference/engine.rs</code>。</p>
+    <p><strong>一手源.</strong> <a href="https://github.com/facebook/rocksdb/blob/main/db/db_impl/db_impl.cc">db_impl.cc</a> <code>GetImpl</code>(mem→imm→current 三段查找)· <a href="https://github.com/facebook/rocksdb/blob/main/db/column_family.h">column_family.h</a> <code>struct SuperVersion</code> · <a href="https://github.com/facebook/rocksdb/blob/main/db/version_set.cc">version_set.cc</a> <code>Version::Get</code>。</p>
+    <p><strong>卡住了问我.</strong></p>
+  </div>
+</div>
+</body>
+</html>
